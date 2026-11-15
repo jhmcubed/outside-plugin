@@ -113,6 +113,24 @@ public final class Attach
 		return base + "/keep/" + enc(channel) + "/" + enc(what) + "?key=" + enc(key);
 	}
 
+	/** The relay's Dink route, for the plugin's own reports (11/15/2026): http(s)://…/dink/<channel>?key=…&from=plugin. */
+	public String dinkUrl()
+	{
+		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/dink/" + enc(channel) + "?") + "&from=plugin";
+	}
+
+	/** Your year's routes (11/15/2026; docs/record.md, "Sync"): http(s)://…/record/<channel>/<tail>?key=…. */
+	public String recordUrl(String tail)
+	{
+		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/record/" + enc(channel) + "/" + enc(tail) + "?");
+	}
+
+	/** Who stands behind the page (11/15/2026): http(s)://…/proof/<channel>, anyone's. */
+	public String proofUrl()
+	{
+		return keepUrl("x").replaceFirst("/keep/.*$", "/proof/" + enc(channel));
+	}
+
 	/** The outstation's page on Outside. */
 	public String page()
 	{

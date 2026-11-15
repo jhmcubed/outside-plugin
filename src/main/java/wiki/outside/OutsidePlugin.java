@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonNull;
 import com.google.inject.Provides;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -49,6 +50,8 @@ import net.runelite.api.events.GameTick;
 import net.runelite.api.events.HitsplatApplied;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.StatChanged;
+import net.runelite.client.events.NpcLootReceived;
+import net.runelite.client.game.ItemStack;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.CommandExecuted;
 import net.runelite.api.events.MenuOptionClicked;
@@ -103,8 +106,12 @@ public class OutsidePlugin extends Plugin
 {
 	private static final Logger log = LoggerFactory.getLogger(OutsidePlugin.class);
 	static final String VERSION = "0.2.0";
+	/** the relay a page is claimed on when there's no key yet (docs/protocol.md "Claiming a name") */
+	static final String HOME_RELAY = "https://relay.ghillie.workers.dev";
 	/** vitals alone (run energy draining as you run) go at most this often, in ticks */
 	private static final int VITALS_EVERY = 5;
+	/** quests and diaries read again at least this often, in ticks (5 minutes) */
+	private static final int PROGRESS_EVERY = 500;
 	/** the longest wait between tries to reach the relay, in seconds */
 	private static final int RETRY_MOST = 60;
 
@@ -155,6 +162,12 @@ public class OutsidePlugin extends Plugin
 	private volatile boolean resend;
 	/** sending held while somewhere dangerous (the Wilderness, a PvP area or world: held()), and said so once */
 	private boolean paused;
+	// (quests and diaries, read again when what they depend on changes, or every 5 minutes; the slayer task's names
+	// looked up again when its varps change; 11/15/2026)
+	private JsonObject questsSeen, diariesSeen, slayerSeen;
+	private long progressSig = Long.MIN_VALUE;
+	private int progressAt = -1;
+	private String slayerKey;
 	private volatile WebSocket socket;
 	private volatile boolean open;
 	/** stopped for good until the key changes (a wrong key, or another RuneLite took over) */
@@ -162,6 +175,23 @@ public class OutsidePlugin extends Plugin
 	private Attach attach;
 	private ScheduledFuture<?> retry;
 	private int retryIn = 5;
+	/** the character logged in, as a channel has its name (null: not known yet, or logged out). 11/15/2026, Jace: logged
+	 *  into his alt, the side tab still said sburb, and the alt's kit would have gone to sburb's page: a key is now this
+	 *  character's own (kept per account), and nothing goes on a key whose page isn't the character logged in. */
+	private volatile String character = null;
+	/** your year (11/15/2026; Record): the character's record, its own place and activity (two minutes behind, the
+	 *  public switches' logic run apart, so it records with them off), what's held, and when a line last stated it */
+	private volatile Record yearRecord = null;
+	private volatile String yearFor = null;
+	private final Follow yearFollow = new Follow();
+	private final Behind yearDoing = new Behind("activity");
+	private final java.util.Map<String, JsonElement> yearHeld = new java.util.concurrent.ConcurrentHashMap<>();
+	private long yearStated = 0;
+	private volatile long yearSynced = 0;
+	/** each skill's real level as last seen this session, for the levels' reports */
+	private final java.util.Map<String, Integer> levelsSeen = new java.util.concurrent.ConcurrentHashMap<>();
+	/** this key is a challenger's (taking a name back, 11/15/2026): what it sends only proves the name, till it's proven */
+	private volatile boolean challenging = false;
 	private int ticksSinceSent;
 	/** the seed box's and the chugging barrel's slots as last sent by the game (onItemContainerChanged), or null */
 	private JsonElement seedsSeen, barrelSeen;
@@ -201,11 +231,12 @@ public class OutsidePlugin extends Plugin
 		panel = new OutsidePanel(panelHooks());
 		navButton = net.runelite.client.ui.NavigationButton.builder().tooltip("Outside").icon(tabIcon()).priority(8).panel(panel).build();
 		clientToolbar.addNavigation(navButton);
-		Attach a = Attach.parse(config.stationKey(), gson);
+		Attach a = key();
 		panel.who(a == null ? null : a.getChannel());
 		if (a != null)
 		{
 			readMotions();
+			readProof();
 		}
 		connect();
 	}
@@ -230,9 +261,10 @@ public class OutsidePlugin extends Plugin
 		}
 		if (panel != null && e.getKey().equals("stationKey"))
 		{
-			Attach a = Attach.parse(config.stationKey(), gson);
+			Attach a = key();
 			panel.who(a == null ? null : a.getChannel());
 			readMotions();
+			readProof();
 		}
 		// (a new key, or sending switched: start again; a part switched off goes as an empty field next tick)
 		if (e.getKey().equals("stationKey") || e.getKey().equals("send"))
@@ -264,6 +296,10 @@ public class OutsidePlugin extends Plugin
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged e)
 	{
+		if (e.getGameState() == GameState.LOGGED_IN)
+		{
+			readProof();   // (proven since the last logout? the side tab says so)
+		}
 		if (e.getGameState() == GameState.LOGIN_SCREEN)
 		{
 			// (logged out: the relay drops the area and the activity with the rest; next time, the two minutes start
@@ -297,6 +333,12 @@ public class OutsidePlugin extends Plugin
 			send(off);
 			resend = true;
 		}
+		if (e.getGameState() == GameState.LOGIN_SCREEN)
+		{
+			yearLogout();
+			character = null;
+			levelsSeen.clear();
+		}
 		else if (e.getGameState() == GameState.LOGGED_IN)
 		{
 			resend = true;
@@ -310,6 +352,14 @@ public class OutsidePlugin extends Plugin
 		if (client.getGameState() != GameState.LOGGED_IN)
 		{
 			return;
+		}
+		// (whose game this is: known from the first tick; another than before, the key and the side tab follow)
+		Player me = client.getLocalPlayer();
+		String whose = me == null ? null : channelName(me.getName());
+		if (whose != null && !whose.equals(character))
+		{
+			character = whose;
+			characterChanged();
 		}
 		ticks++;
 		// (the bank: sent three ticks after it last changed, so a whole deposit goes once)
@@ -338,6 +388,7 @@ public class OutsidePlugin extends Plugin
 		JsonObject where = follow(ms, safe);
 		JsonObject what = activity(ms, activitySafe(riskyWorld, wild, pvpArea, config.wilderness()));
 		JsonObject path = track(ms, at, safe);
+		yearTick(ms, at, safe, activitySafe(riskyWorld, wild, pvpArea, false), path);
 		look(ms, safe);
 		encounter(ms, safe);
 		liveSafe = safe && !paused;
@@ -518,6 +569,41 @@ public class OutsidePlugin extends Plugin
 				skills.add(s.getName(), v);
 			}
 			m.put("skills", skills);
+		}
+		if (config.progress())
+		{
+			long sig = Progress.signature(client);
+			if (sig != progressSig || progressAt < 0 || ticks - progressAt >= PROGRESS_EVERY)
+			{
+				progressSig = sig;
+				progressAt = ticks;
+				questsSeen = Progress.readQuests(client);
+				diariesSeen = Progress.readDiaries(client);
+			}
+			m.put("quests", questsSeen);
+			m.put("diaries", diariesSeen);
+			m.put("combat", Progress.readCombat(client));
+		}
+		else
+		{
+			// (switched off: taken off their page)
+			m.put("quests", JsonNull.INSTANCE);
+			m.put("diaries", JsonNull.INSTANCE);
+			m.put("combat", JsonNull.INSTANCE);
+		}
+		if (config.slayer())
+		{
+			String k = Progress.slayerKey(client);
+			if (!k.equals(slayerKey) || slayerSeen == null)
+			{
+				slayerKey = k;
+				slayerSeen = Progress.readSlayer(client);
+			}
+			m.put("slayer", slayerSeen);
+		}
+		else
+		{
+			m.put("slayer", JsonNull.INSTANCE);
 		}
 		if (config.vitals())
 		{
@@ -738,6 +824,10 @@ public class OutsidePlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage e)
 	{
+		if (e.getType() == ChatMessageType.GAMEMESSAGE || e.getType() == ChatMessageType.SPAM)
+		{
+			report(Reports.fromChat(Text.removeTags(e.getMessage()), myName()));
+		}
 		if (!config.charges() || (e.getType() != ChatMessageType.GAMEMESSAGE && e.getType() != ChatMessageType.SPAM))
 		{
 			return;
@@ -1010,7 +1100,7 @@ public class OutsidePlugin extends Plugin
 	/** The live view's uploads (the relay's /keep/<channel>/live and /livemotion), quietly: nothing said in the chat. */
 	private void keepLive(String what, String anim, JsonObject body)
 	{
-		Attach a = attach != null ? attach : Attach.parse(config.stationKey(), gson);
+		Attach a = attach != null ? attach : key();
 		if (a == null || !config.send() || liveGear == null)
 		{
 			return;
@@ -1136,12 +1226,13 @@ public class OutsidePlugin extends Plugin
 			public void refresh()
 			{
 				readMotions();
+				readProof();
 			}
 
 			@Override
 			public void first(String name)
 			{
-				Attach a = Attach.parse(config.stationKey(), gson);
+				Attach a = key();
 				if (a == null)
 				{
 					return;
@@ -1178,9 +1269,57 @@ public class OutsidePlugin extends Plugin
 			}
 
 			@Override
+			public void openYear()
+			{
+				openMyYear();
+			}
+
+			@Override
+			public void claim()
+			{
+				clientThread.invokeLater(() ->
+				{
+					if (client.getLocalPlayer() == null || client.getLocalPlayer().getName() == null)
+					{
+						panel.claiming(false, "log in first: your page is named after the character you're logged in as");
+						return;
+					}
+					String shown = client.getLocalPlayer().getName();
+					String name = channelName(shown);
+					if (name == null)
+					{
+						panel.claiming(false, "\"" + shown + "\" can't be a page's name");
+						return;
+					}
+					long hash = client.getAccountHash();
+					claimPage(name, hash == -1 ? null : Long.toString(hash));
+				});
+			}
+
+			@Override
+			public void copyKey()
+			{
+				Attach a = key();
+				if (a == null)
+				{
+					panel.keyStatus("no key for this character yet");
+					return;
+				}
+				try
+				{
+					java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new java.awt.datatransfer.StringSelection(stationKey().trim()), null);
+					panel.keyStatus("copied: paste it into the outstation's first screen");
+				}
+				catch (IllegalStateException | java.awt.HeadlessException ex)
+				{
+					panel.keyStatus("the clipboard's busy: try again");
+				}
+			}
+
+			@Override
 			public void openPage()
 			{
-				Attach a = Attach.parse(config.stationKey(), gson);
+				Attach a = key();
 				if (a != null)
 				{
 					net.runelite.client.util.LinkBrowser.browse("https://outside.wiki/" + java.net.URLEncoder.encode(a.getChannel(), java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20"));
@@ -1189,10 +1328,168 @@ public class OutsidePlugin extends Plugin
 		};
 	}
 
+	/** The station key for the character logged in: their own (kept with their account by "Make my Outside page"), else
+	 *  the one in the plugin's settings. */
+	private String stationKey()
+	{
+		String own = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "stationKey");
+		return own != null && !own.trim().isEmpty() ? own : config.stationKey();
+	}
+
+	/** The key read, or null: none, or one whose page isn't the character logged in (another account's). */
+	private Attach key()
+	{
+		Attach a = Attach.parse(stationKey(), gson);
+		String c = character;
+		return a != null && c != null && !a.getChannel().toLowerCase(java.util.Locale.ROOT).equals(c) ? null : a;
+	}
+
+	/** Another character logged in (or the first, once its name is known): the side tab, and the relay on their key. */
+	private void characterChanged()
+	{
+		progressAt = -1;
+		slayerKey = null;
+		slayerSeen = null;
+		Attach any = Attach.parse(stationKey(), gson), a = key();
+		if (panel != null)
+		{
+			panel.who(a == null ? null : a.getChannel());
+			panel.otherKey(any != null && a == null ? any.getChannel() : null, character);
+			readMotions();
+			readProof();
+		}
+		if (attach != null && (a == null || !a.getChannel().equals(attach.getChannel())))
+		{
+			close("another character");
+		}
+		stopped = false;
+		toldConnected = false;
+		connect();
+	}
+
+	/** A player's name as a channel has it: lower case, the spaces, hyphens and underscores the game treats alike taken
+	 *  out (its names use a no-break space), 1 to 12 letters or numbers; null when it can't be one. */
+	static String channelName(String shown)
+	{
+		if (shown == null)
+		{
+			return null;
+		}
+		String n = shown.toLowerCase(java.util.Locale.ROOT).replaceAll("[\\s\u00a0_-]", "");
+		return n.matches("[a-z0-9]{1,12}") ? n : null;
+	}
+
+	/** Claims a page for the name (docs/protocol.md "Claiming a name"): the key that comes back goes in the settings,
+	 *  which connects as any key does (onConfigChanged). */
+	private void claimPage(String name, String account)
+	{
+		panel.claiming(true, null);
+		JsonObject body = new JsonObject();
+		body.addProperty("player", name);
+		if (account != null)
+		{
+			body.addProperty("account", account);
+		}
+		Request req = new Request.Builder().url(HOME_RELAY + "/claim").header("User-Agent", "outside-plugin/" + VERSION)
+			.post(RequestBody.create(JSON, gson.toJson(body))).build();
+		http.newCall(req).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				panel.claiming(false, "the relay's out of reach: try again in a bit");
+			}
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				try (Response res = r)
+				{
+					String text = res.body() != null ? res.body().string() : "";
+					JsonObject o = null;
+					try
+					{
+						o = gson.fromJson(text, JsonObject.class);
+					}
+					catch (RuntimeException ignored)
+					{
+					}
+					if (res.code() == 200 && o != null && o.has("code") && Attach.parse(o.get("code").getAsString(), gson) != null)
+					{
+						boolean back = o.has("proof") && "challenging".equals(o.get("proof").getAsString());
+						challenging = back;
+						configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "stationKey", o.get("code").getAsString());
+						if (back)
+						{
+							// (taking a name back: someone else claimed it first and hasn't proven it)
+							panel.claiming(false, "outside.wiki/" + name + " was claimed by someone who hasn't proven it. Gain any experience,"
+								+ " then log out: when the official hiscores show it, the page is yours.");
+							say("you're taking back outside.wiki/" + name + ": gain any experience, then log out");
+						}
+						else
+						{
+							panel.claiming(false, "your page: outside.wiki/" + name + " (marked unproven till it's proven yours)");
+							say("your Outside page is made: outside.wiki/" + name);
+						}
+						return;
+					}
+					if (res.code() == 409)
+					{
+						panel.claiming(false, "outside.wiki/" + name + " is proven or vouched for already. If it's yours, paste its station key in the plugin's settings.");
+						return;
+					}
+					String why = o != null && o.has("error") ? o.get("error").getAsString() : "the relay said " + res.code();
+					panel.claiming(false, why);
+				}
+				catch (IOException ex)
+				{
+					panel.claiming(false, "the relay's out of reach: try again in a bit");
+				}
+			}
+		});
+	}
+
+	/** Whether their page is proven theirs, into the side tab (docs/protocol.md "Proving a name"). */
+	private void readProof()
+	{
+		Attach a = key();
+		if (a == null || panel == null)
+		{
+			if (panel != null)
+			{
+				panel.proof(null, null);
+			}
+			return;
+		}
+		http.newCall(new Request.Builder().url(a.proofUrl() + "?key=" + java.net.URLEncoder.encode(a.getKey(), java.nio.charset.StandardCharsets.UTF_8))
+			.header("User-Agent", "outside-plugin/" + VERSION).build()).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+			}
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				try (Response res = r)
+				{
+					JsonObject o = res.code() == 200 && res.body() != null ? gson.fromJson(res.body().string(), JsonObject.class) : null;
+					String proof = o != null && o.has("proof") ? o.get("proof").getAsString() : null;
+					challenging = "challenging".equals(proof);
+					panel.proof(proof, o != null && o.has("why") ? o.get("why").getAsString() : null);
+				}
+				catch (IOException | RuntimeException ignored)
+				{
+				}
+			}
+		});
+	}
+
 	/** The motions on their page and the one it shows first, into the side tab. */
 	private void readMotions()
 	{
-		Attach a = Attach.parse(config.stationKey(), gson);
+		Attach a = key();
 		if (a == null || panel == null)
 		{
 			return;
@@ -1816,7 +2113,7 @@ public class OutsidePlugin extends Plugin
 
 	private void keep(String what, String name, JsonObject body)
 	{
-		Attach a = attach != null ? attach : Attach.parse(config.stationKey(), gson);
+		Attach a = attach != null ? attach : key();
 		if (a == null || !config.send())
 		{
 			return;
@@ -1909,17 +2206,404 @@ public class OutsidePlugin extends Plugin
 	@Subscribe
 	public void onStatChanged(StatChanged e)
 	{
-		if (config.activity())
+		if (config.activity() || config.year())
 		{
 			activity.xp(System.currentTimeMillis(), e.getSkill().getName(), e.getXp());
 		}
+		// (a level gained: its real level above the one last seen this session; the first seen is only remembered)
+		String skill = e.getSkill().getName();
+		Integer was = levelsSeen.put(skill, e.getLevel());
+		if (was != null && e.getLevel() > was && client.getGameState() == GameState.LOGGED_IN)
+		{
+			java.util.Map<String, Integer> one = new java.util.LinkedHashMap<>();
+			one.put(skill, e.getLevel());
+			report(Reports.levels(one, myName()));
+		}
+	}
+
+	/** A monster's loot (RuneLite's own reading of it, as Dink's): worth "Drops worth at least" or more, a report. */
+	@Subscribe
+	public void onNpcLootReceived(NpcLootReceived e)
+	{
+		if (!config.reports() || e.getNpc() == null)
+		{
+			return;
+		}
+		java.util.List<Reports.Item> items = new java.util.ArrayList<>();
+		for (ItemStack s : e.getItems())
+		{
+			int id = itemManager.canonicalize(s.getId());
+			items.add(new Reports.Item(id, itemManager.getItemComposition(id).getName(), s.getQuantity(), itemManager.getItemPrice(id)));
+		}
+		report(Reports.loot(e.getNpc().getName(), items, Math.max(0, config.reportLoot()), myName()));
+	}
+
+	// ---- your year (11/15/2026; Record, docs/record.md)
+
+	/** The record for the character logged in (made the first time), or null: not logged in, or "Record my year" off. */
+	private Record yearRecord()
+	{
+		String c = character;
+		if (c == null || !config.year())
+		{
+			return null;
+		}
+		if (yearRecord == null || !c.equals(yearFor))
+		{
+			try
+			{
+				yearRecord = new Record(net.runelite.client.RuneLite.RUNELITE_DIR.toPath().resolve("outside").resolve("record").resolve(c), gson);
+				yearFor = c;
+				yearHeld.clear();
+			}
+			catch (IOException ex)
+			{
+				log.debug("outside: the year's folder couldn't be made", ex);
+				return null;
+			}
+		}
+		return yearRecord;
+	}
+
+	/** A line written to the year: its time, and what it states. */
+	private void yearWrite(long t, java.util.Map<String, JsonElement> fields)
+	{
+		Record r = yearRecord();
+		if (r == null || fields.isEmpty())
+		{
+			return;
+		}
+		JsonObject line = new JsonObject();
+		line.addProperty("t", t);
+		fields.forEach(line::add);
+		try
+		{
+			r.write(line);
+		}
+		catch (IOException ex)
+		{
+			log.debug("outside: a line of the year couldn't be written", ex);
+		}
+	}
+
+	/** Each tick: the year's place (two minutes behind, as following's), its activity (the same), the exact path (with
+	 *  its switch on), each when it changes or is cleared; a line restating what's held a minute after the last; and
+	 *  the hourly upload. */
+	private void yearTick(long now, WorldPoint at, boolean safe, boolean actSafe, JsonObject path)
+	{
+		if (!config.year() || character == null)
+		{
+			return;
+		}
+		java.util.Map<String, JsonElement> said = new java.util.LinkedHashMap<>();
+		JsonObject w = at == null ? null : yearFollow.tick(now, at.getX(), at.getY(), client.getWorld(), safe);
+		if (!config.activity())
+		{
+			activity.region(at == null ? -1 : at.getRegionID(), at == null ? 0 : at.getPlane());
+			activity.trial(client.getVarbitValue(VarbitID.SAILING_BT_IN_TRIAL) != 0);
+		}
+		JsonObject a = yearDoing.tick(now, activity.now(now), actSafe);
+		for (JsonObject o : new JsonObject[]{w, a, path})
+		{
+			if (o == null)
+			{
+				continue;
+			}
+			for (java.util.Map.Entry<String, JsonElement> e : o.entrySet())
+			{
+				said.put(e.getKey(), e.getValue());
+				if (e.getValue() == null || e.getValue().isJsonNull())
+				{
+					yearHeld.remove(e.getKey());
+				}
+				else
+				{
+					yearHeld.put(e.getKey(), e.getValue());
+				}
+			}
+		}
+		if (said.containsKey("where") || said.containsKey("activity"))
+		{
+			yearStated = now;
+		}
+		else if (!yearHeld.isEmpty() && now - yearStated >= 60_000)
+		{
+			// (the heartbeat: a long stay in one place counts as long)
+			said.putAll(yearHeld);
+			yearStated = now;
+		}
+		yearWrite(now, said);
+		if (now - yearSynced > 3_600_000)
+		{
+			yearSynced = now;
+			executor.submit(() -> yearSync(null));
+		}
+	}
+
+	/** A report's events (array.ts's arrayEvents' shapes) into the year, never from somewhere the plugin holds back. */
+	private void yearEvents(JsonObject payload)
+	{
+		if (payload == null || paused || !config.year())
+		{
+			return;
+		}
+		JsonObject x = payload.getAsJsonObject("extra");
+		java.util.List<JsonObject> events = new java.util.ArrayList<>();
+		switch (payload.get("type").getAsString())
+		{
+			case "KILL_COUNT":
+				events.add(event("kill", "boss", x.get("boss"), "kc", x.get("count")));
+				break;
+			case "LEVEL":
+				for (java.util.Map.Entry<String, JsonElement> e : x.getAsJsonObject("levelledSkills").entrySet())
+				{
+					events.add(event("level", "skill", new com.google.gson.JsonPrimitive(e.getKey()), "level", e.getValue()));
+				}
+				break;
+			case "PET":
+				events.add(event("pet", null, null, null, null));
+				break;
+			case "COLLECTION":
+				events.add(event("clog", "name", x.get("itemName"), null, null));
+				break;
+			case "CLUE":
+				events.add(event("clue", "tier", x.get("clueType"), "count", x.get("numberCompleted")));
+				break;
+			case "LOOT":
+			{
+				long value = 0;
+				String name = null;
+				long most = -1;
+				for (JsonElement i : x.getAsJsonArray("items"))
+				{
+					JsonObject o = i.getAsJsonObject();
+					long worth = o.get("quantity").getAsLong() * o.get("priceEach").getAsLong();
+					value += worth;
+					if (worth > most)
+					{
+						most = worth;
+						name = o.get("name").getAsString();
+					}
+				}
+				if (value >= 1_000_000)
+				{
+					events.add(event("loot", "name", new com.google.gson.JsonPrimitive(name), "value", new com.google.gson.JsonPrimitive(value)));
+				}
+				break;
+			}
+			default:
+				break;
+		}
+		long now = System.currentTimeMillis();
+		for (JsonObject ev : events)
+		{
+			java.util.Map<String, JsonElement> one = new java.util.LinkedHashMap<>();
+			one.put("event", ev);
+			yearWrite(now, one);
+		}
+	}
+
+	private static JsonObject event(String kind, String k1, JsonElement v1, String k2, JsonElement v2)
+	{
+		JsonObject o = new JsonObject();
+		o.addProperty("kind", kind);
+		if (k1 != null && v1 != null)
+		{
+			o.add(k1, v1);
+		}
+		if (k2 != null && v2 != null)
+		{
+			o.add(k2, v2);
+		}
+		return o;
+	}
+
+	/** Logged out: what's held is cleared in the record (a gap, not a stay), and what's new goes up. */
+	private void yearLogout()
+	{
+		if (yearRecord != null && character != null && !yearHeld.isEmpty())
+		{
+			java.util.Map<String, JsonElement> gone = new java.util.LinkedHashMap<>();
+			for (String k : yearHeld.keySet())
+			{
+				gone.put(k, com.google.gson.JsonNull.INSTANCE);
+			}
+			yearWrite(System.currentTimeMillis(), gone);
+		}
+		yearHeld.clear();
+		yearFollow.forget();
+		yearDoing.forget();
+		if (executor != null)
+		{
+			executor.submit(() -> yearSync(null));
+		}
+	}
+
+	/** This character's record key ("record1:", kept with their account), made the first time it's asked for. */
+	private byte[] recordKey(boolean make)
+	{
+		String text = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "recordKey");
+		byte[] k = Record.parseKey(text);
+		if (k == null && make)
+		{
+			k = Record.newKey();
+			configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "recordKey", Record.keyText(k));
+		}
+		return k;
+	}
+
+	/** Uploads each day whose lines changed (docs/record.md, "Sync"): the tokens registered first. On the executor;
+	 *  `then` after, whatever happened. */
+	private void yearSync(Runnable then)
+	{
+		try
+		{
+			Attach a = key();
+			Record r = yearRecord;
+			byte[] k = recordKey(false);
+			if (a == null || r == null || k == null || !config.yearCopy())
+			{
+				return;
+			}
+			JsonObject tokens = new JsonObject();
+			tokens.addProperty("read", Record.readToken(k));
+			tokens.addProperty("write", Record.writeToken(k));
+			try (Response res = http.newCall(new Request.Builder().url(a.recordUrl("token")).header("User-Agent", "outside-plugin/" + VERSION)
+				.post(RequestBody.create(JSON, gson.toJson(tokens))).build()).execute())
+			{
+				if (res.code() != 204 && res.code() != 200)
+				{
+					panel.yearStatus("the relay didn't take your year's key (" + res.code() + ")");
+					return;
+				}
+			}
+			String to = a.getRelay() + "|" + a.getChannel() + "|" + Record.readToken(k).substring(0, 8);
+			java.util.Map<String, Integer> sent = r.sent(to);
+			byte[] seal = Record.sealKey(k);
+			for (java.util.Map.Entry<String, java.util.List<String>> d : r.days().entrySet())
+			{
+				java.util.List<String> lines = d.getValue();
+				if (sent.getOrDefault(d.getKey(), -1) == lines.size())
+				{
+					continue;
+				}
+				boolean ok = true;
+				for (int part = 0; part * Record.PART_LINES < lines.size() && ok; part++)
+				{
+					java.util.List<String> some = lines.subList(part * Record.PART_LINES, Math.min(lines.size(), (part + 1) * Record.PART_LINES));
+					String id = Record.chunkId(k, r.device, d.getKey(), part);
+					byte[] sealed = Record.seal(seal, id, Record.plaintext(r.device, d.getKey(), part, some));
+					try (Response res = http.newCall(new Request.Builder().url(a.recordUrl(id)).header("User-Agent", "outside-plugin/" + VERSION)
+						.put(RequestBody.create(MediaType.parse("application/octet-stream"), sealed)).build()).execute())
+					{
+						ok = res.isSuccessful();
+					}
+				}
+				if (ok)
+				{
+					r.markSent(to, d.getKey(), lines.size());
+				}
+			}
+		}
+		catch (IOException | RuntimeException ex)
+		{
+			log.debug("outside: the year didn't go up", ex);
+		}
+		finally
+		{
+			if (then != null)
+			{
+				then.run();
+			}
+		}
+	}
+
+	/** "Open my year": the encrypted copy switched on if it isn't (asked first), what's new sent, and the year's page
+	 *  opened with the key in its fragment (never sent to any server; docs/record.md, "Viewing"). */
+	private void openMyYear()
+	{
+		Attach a = key();
+		if (a == null || character == null)
+		{
+			panel.yearStatus("log in on a character with a page first");
+			return;
+		}
+		if (!config.year())
+		{
+			panel.yearStatus("switch on \"Record my year\" in the plugin's settings first");
+			return;
+		}
+		if (!config.yearCopy())
+		{
+			javax.swing.SwingUtilities.invokeLater(() ->
+			{
+				int yes = javax.swing.JOptionPane.showConfirmDialog(panel,
+					"<html><div style='width:280px'>Your year is kept on this PC. To see it on outside.wiki, an encrypted copy"
+						+ " goes to the relay, sealed with a key only your own computers hold: the relay can't read it, and"
+						+ " lose the key and nobody can.<br><br>Keep an encrypted copy on the relay?</div></html>",
+					"Your year", javax.swing.JOptionPane.YES_NO_OPTION);
+				if (yes == javax.swing.JOptionPane.YES_OPTION)
+				{
+					configManager.setConfiguration(OutsideConfig.GROUP, "yearCopy", true);
+					openMyYear();
+				}
+			});
+			return;
+		}
+		byte[] k = recordKey(true);
+		panel.yearStatus("sending what's new, then opening your year");
+		String page = "https://outside.wiki/" + java.net.URLEncoder.encode(a.getChannel(), java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20")
+			+ "/year/mine#k=" + Record.keyB64u(k);
+		executor.submit(() -> yearSync(() ->
+		{
+			panel.yearStatus(" ");
+			net.runelite.client.util.LinkBrowser.browse(page);
+		}));
+	}
+
+	/** The name they're logged in as, for a report's line. */
+	private String myName()
+	{
+		Player me = client.getLocalPlayer();
+		return me == null || me.getName() == null ? "the subject" : me.getName().replace('\u00a0', ' ');
+	}
+
+	/** A report sent to the relay's Dink route (docs/protocol.md "Dink", from=plugin): with "Levels, kills, drops and log
+	 *  slots" on, a key for the character logged in, and never while held somewhere dangerous (the Wilderness, a PvP
+	 *  area or world), as nothing else is sent there. */
+	private void report(JsonObject payload)
+	{
+		yearEvents(payload);
+		Attach a = attach;
+		String c = character;
+		if (payload == null || !config.reports() || !config.send() || paused || a == null || c == null
+			|| !a.getChannel().toLowerCase(java.util.Locale.ROOT).equals(c))
+		{
+			return;
+		}
+		Request req = new Request.Builder().url(a.dinkUrl()).header("User-Agent", "outside-plugin/" + VERSION)
+			.post(RequestBody.create(JSON, gson.toJson(payload))).build();
+		http.newCall(req).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				log.debug("outside: a report didn't reach the relay", ex);
+			}
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				r.close();
+			}
+		});
 	}
 
 	/** A hit in their own fight: theirs on an NPC, or one on them (the activity's fighting, and which boss). */
 	@Subscribe
 	public void onHitsplatApplied(HitsplatApplied e)
 	{
-		if (!config.activity())
+		if (!config.activity() && !config.year())
 		{
 			return;
 		}
@@ -2125,7 +2809,9 @@ public class OutsidePlugin extends Plugin
 	private boolean send(JsonObject fields)
 	{
 		WebSocket ws = socket;
-		if (ws == null || !open)
+		Attach a = attach;
+		String c = character;
+		if (ws == null || !open || a == null || c == null || !a.getChannel().toLowerCase(java.util.Locale.ROOT).equals(c))
 		{
 			return false;
 		}
@@ -2140,7 +2826,7 @@ public class OutsidePlugin extends Plugin
 		{
 			return;
 		}
-		attach = Attach.parse(config.stationKey(), gson);
+		attach = key();
 		if (attach == null)
 		{
 			return;
@@ -2157,7 +2843,8 @@ public class OutsidePlugin extends Plugin
 				if (!toldConnected)
 				{
 					toldConnected = true;
-					say("your outstation (" + attach.getChannel() + ") is receiving what you wear and carry: " + attach.page());
+					say(challenging ? "your claim on outside.wiki/" + attach.getChannel() + " is being proven: gain any experience, then log out"
+						: "your outstation (" + attach.getChannel() + ") is receiving what you wear and carry: " + attach.page());
 				}
 			}
 
@@ -2190,10 +2877,20 @@ public class OutsidePlugin extends Plugin
 		}
 		socket = null;
 		open = false;
+		if (code == 4012)
+		{
+			// (taking a name back, 11/15/2026: proven, the page is theirs now; its key opens it as the holder's)
+			challenging = false;
+			say("your Outside page is proven yours: outside.wiki/" + attach.getChannel());
+			readProof();
+			retry = executor.schedule(this::connect, 1, TimeUnit.SECONDS);
+			return;
+		}
 		if (code == 4001 || code == 4003)
 		{
 			stopped = true;
-			say("the relay didn't take your station key: paste it again in the plugin's settings");
+			say(challenging ? "someone else proved this name first, so your claim on it has ended"
+				: "the relay didn't take your station key: paste it again in the plugin's settings");
 			return;
 		}
 		if (code == 4000)

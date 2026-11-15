@@ -12,8 +12,8 @@ public interface OutsideConfig extends Config
 	@ConfigItem(
 		keyName = "stationKey",
 		name = "Station key",
-		description = "Your outstation's station key (it starts outstation1:), from the outstation or a friend's invite."
-			+ " With it, what you wear and carry and your stats show live on your Outside page.",
+		description = "Your station key (it starts outstation1:): made for you by \"Make my Outside page\" in the Outside side tab,"
+			+ " or from the outstation or a friend's invite. With it, what you wear and carry and your stats show live on your Outside page.",
 		secret = true,
 		position = 0
 	)
@@ -60,6 +60,30 @@ public interface OutsideConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "progress",
+		name = "Quests, diaries and combat achievements",
+		description = "Your quests (done and started) and quest points, each Achievement Diary's tiers and tasks, and your combat"
+			+ " achievements' points and tasks by tier",
+		position = 3
+	)
+	default boolean progress()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "slayer",
+		name = "My slayer task",
+		description = "Your slayer task (the monster, how many are left of how many, and where if your master named it),"
+			+ " your slayer points and your task streak",
+		position = 3
+	)
+	default boolean slayer()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "wilderness",
 		name = "In the Wilderness too",
 		description = "Off (to begin with): in the Wilderness, a PvP area or on a PvP or Deadman world, nothing more is"
@@ -94,12 +118,13 @@ public interface OutsideConfig extends Config
 		name = "Follow me on the globe",
 		description = "Off (to begin with). On, your outstation's light on outside.wiki's globe travels to the rough area"
 			+ " you were in two minutes ago (a square of the map about 128 tiles a side), at most once a minute, while"
-			+ " your outstation's transmitting. In an instance (a raid, a boss room), the area it's opened from. Never in"
+			+ " you're logged in with this plugin (or your outstation's transmitting). In an instance (a raid, a boss room), the area it's opened from. Never in"
 			+ " the Wilderness (whatever \"In the Wilderness too\" says), a PvP area, or on a PvP or Deadman world: there,"
 			+ " what was sent is cleared at once. Ferox Enclave and the PvP minigames are safe.",
 		warning = "On, the rough area you were in two minutes ago (a square of the map about 128 tiles a side) goes to"
 			+ " your outstation's relay, a server not controlled or verified by the RuneLite developers, at most once a"
-			+ " minute, and anyone who opens outside.wiki's globe can see it while your outstation's transmitting.",
+			+ " minute, and anyone who opens outside.wiki's globe can see it while you're logged in with this plugin or your"
+			+ " outstation's transmitting.",
 		position = 6
 	)
 	default boolean follow()
@@ -114,7 +139,7 @@ public interface OutsideConfig extends Config
 			+ " the square, so the globe can show which world your light's on. Never on a PvP, Deadman or other"
 			+ " dangerous world, and never without following.",
 		warning = "On, the world you were on two minutes ago goes with the rough area (a square of the map about 128"
-			+ " tiles a side), so anyone who opens outside.wiki's globe while your outstation's transmitting can see which"
+			+ " tiles a side), so anyone who opens outside.wiki's globe while you're logged in with this plugin can see which"
 			+ " world and roughly where you were two minutes before.",
 		position = 7
 	)
@@ -128,13 +153,13 @@ public interface OutsideConfig extends Config
 		name = "What I'm doing, on the globe",
 		description = "Off (to begin with). On, your outstation's light on outside.wiki's globe shows what you were doing"
 			+ " two minutes ago, only as one word: skilling (and which skill), a boss, a raid or a minigame (and which),"
-			+ " fighting, or idle. At most once a minute, while your outstation's transmitting. Never in a PvP area or on"
+			+ " fighting, or idle. At most once a minute, while you're logged in with this plugin. Never in a PvP area or on"
 			+ " a PvP or Deadman world (Ferox Enclave and the PvP minigames are safe), nor in the Wilderness unless"
 			+ " \"In the Wilderness too\" is on: there, what was sent is cleared at once. It doesn't need following on.",
 		warning = "On, what you were doing two minutes ago (skilling and which skill, a boss, raid or minigame and"
 			+ " which, fighting, or idle) goes to your outstation's relay, a server not controlled or verified by the RuneLite developers,"
-			+ " at most once a minute, and anyone who opens outside.wiki's globe can see it while your outstation's"
-			+ " transmitting.",
+			+ " at most once a minute, and anyone who opens outside.wiki's globe can see it while you're logged in with"
+			+ " this plugin.",
 		position = 8
 	)
 	default boolean activity()
@@ -176,11 +201,42 @@ public interface OutsideConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "year",
+		name = "Record my year",
+		description = "On (to begin with). This plugin keeps your year on this PC: the rough area you're in (a square of"
+			+ " the map about 128 tiles a side, two minutes behind), what you're doing, your levels, kills, pets, log"
+			+ " slots, clues and big drops, and with \"Record my exact path\" on, the tiles you walk. Nothing of it leaves"
+			+ " this PC unless the switch below is on. Never in the Wilderness, a PvP area, or on a PvP or Deadman world."
+			+ " Kept in RuneLite's folder, outside/record.",
+		position = 10
+	)
+	default boolean year()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "yearCopy",
+		name = "Keep an encrypted copy on the relay",
+		description = "Off (to begin with). On, your year's record goes to your relay sealed with a key only this PC (and"
+			+ " any you give it to) holds, so \"Open my year\" in the Outside tab can show it on outside.wiki. The relay"
+			+ " can't read it, nor can anyone else without the key.",
+		warning = "On, your year's record (where you've been, what you did, and with the exact path on, the tiles you"
+			+ " walked) goes to your outstation's relay, a server not controlled or verified by the RuneLite developers,"
+			+ " encrypted with a key only your own computers hold. Lose the key and that copy can't be read by anyone.",
+		position = 10
+	)
+	default boolean yearCopy()
+	{
+		return false;
+	}
+
+	@ConfigItem(
 		keyName = "recordPath",
 		name = "Record my exact path for my year",
-		description = "Off (to begin with). On, the exact tile you're on goes to your own outstation, only for your"
-			+ " year's record on your PC (and its encrypted copy, if you keep one): when you move, at most once every"
-			+ " few seconds, and when you stop. On a boat, where it is at sea. Your relay passes it only to your own"
+		description = "Off (to begin with). On, the exact tile you're on goes into your year's record on this PC (and its"
+			+ " encrypted copy, if you keep one), and to your own outstation's app if you run one: when you move, at most"
+			+ " once every few seconds, and when you stop. On a boat, where it is at sea. Your relay passes it only to your own"
 			+ " outstation's app, never keeps it, and never shows it to anyone. Never in the Wilderness, a PvP area, or on"
 			+ " a PvP or Deadman world (Ferox Enclave and the PvP minigames are safe).",
 		warning = "On, the exact tile you're on (and your world) goes to your outstation's relay, a server not controlled"
@@ -203,6 +259,30 @@ public interface OutsideConfig extends Config
 	default boolean charges()
 	{
 		return true;
+	}
+
+	@ConfigItem(
+		keyName = "reports",
+		name = "Levels, kills, drops and log slots",
+		description = "Your levels as you gain them, kill counts, collection log slots, pets, clue counts and drops worth at"
+			+ " least the amount below, as the game tells you them, for your page's event log and outside.wiki's feed (as"
+			+ " Dink would send them; while your outstation transmits, Dink's go through it instead)",
+		position = 12
+	)
+	default boolean reports()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "reportLoot",
+		name = "Drops worth at least",
+		description = "The least a drop is worth (in coins, at Grand Exchange prices) for it to go on your page",
+		position = 12
+	)
+	default int reportLoot()
+	{
+		return 100_000;
 	}
 
 	@ConfigItem(
