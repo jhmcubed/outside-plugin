@@ -61,23 +61,23 @@ It compiles the plugin against your installed RuneLite and opens RuneLite in dev
   - `Kit.java`: the fields, what changed, which items still need naming; kept apart from RuneLite so it's tested
   - `Attach.java`: the station key read back into the relay, the channel and the key
   - `OutsideConfig.java`: the settings
-- The relay's side: [`docs/protocol.md`](https://github.com/jhmcubed/outstation/blob/main/docs/protocol.md), "The game" (jhmcubed/outstation).
+- The relay's side: [`docs/protocol.md`](https://github.com/jhmcubed/outstation/blob/2b2f2713fd66262593e17b4f6ad7e211fdce5686/docs/protocol.md), "The game" (jhmcubed/outstation).
 
 ## For the Hub's review
 
 Checked against RuneLite's own rules (the plugin-hub README, and the wiki's "Plugin Hub Review" and "Rejected or Rolled Back Features", read 11/07/2026). `py hub_check.py` (from the plugin's folder) checks the source for every forbidden feature and API before each submission or update.
 
-**Precedents** (11/09/2026): [`docs/hub-precedents.md`](https://github.com/jhmcubed/outstation/blob/main/docs/hub-precedents.md) (jhmcubed/outstation) goes through every piece of information this plugin reads or sends and names the Plugin Hub plugins (and RuneLite's own) that already read or send the same, with links to the exact lines, where this plugin is stricter, the Hub's written rules as they stand, and what the Hub requires of the licence and the repository (its own repository, with `runelite-plugin.properties` and a `LICENSE` at the root).
+**Precedents** (11/09/2026): [`docs/hub-precedents.md`](https://github.com/jhmcubed/outstation/blob/2b2f2713fd66262593e17b4f6ad7e211fdce5686/docs/hub-precedents.md) (jhmcubed/outstation) goes through every piece of information this plugin reads or sends and names the Plugin Hub plugins (and RuneLite's own) that already read or send the same, with links to the exact lines, where this plugin is stricter, the Hub's written rules as they stand, and what the Hub requires of the licence and the repository (its own repository, with `runelite-plugin.properties` and a `LICENSE` at the root).
 
 - **No forbidden features:** no reflection, JNI or JNA, other programs, code downloaded at runtime, `Desktop`/`LinkBrowser.open`, `Thread.sleep`/`interrupt`, `menuAction`, `java.io` files, `KeyboardFocusManager`, or network clients other than OkHttp. RuneLite's own Gson, OkHttp, executor and client thread are injected, never made. The package isn't `net.runelite`.
 - **No new dependencies:** `build=standard`, nothing outside runelite-client.
 - **Network IO** (a sensitive API, allowed): one WebSocket to the relay named in the station key the player pastes in, through RuneLite's OkHttp. It sends only the player's own game, as listed above; it reads nothing back.
-- **The third-party warning:** on the "Send to my outstation" setting (`@ConfigItem(warning = …)`), and for the Hub's manifest (below).
+- **The third-party warning:** on the "Send to my Outside page" setting (`@ConfigItem(warning = …)`), and for the Hub's manifest (below).
 - **Jagex's rules and the rejected list:**
   - It changes nothing in the game or RuneLite: no overlays, no menu entries, no input, no chat typed.
   - It reads only the player's own character: nothing about other players ("crowdsourcing" is on the rejected list).
   - Location: none. It reads where the player is only to tell whether they're somewhere dangerous, and never sends it.
-  - It runs no server and exposes nothing over HTTP from the PC ("plugins which expose player information over HTTP" are rejected): it sends to the player's own outstation's relay, as RuneProfile and Wise Old Man's plugins send to theirs.
+  - It runs no server and exposes nothing over HTTP from the PC ("plugins which expose player information over HTTP" are rejected): it sends to the Outside relay, as RuneProfile and Wise Old Man's plugins send to theirs.
   - It's free, with nothing behind a paid service.
   - In the Wilderness, a PvP area, or on a PvP or Deadman world, it stops sending, so nobody watching can see what a player risks. Not in Ferox Enclave, the Wilderness's safe town, where no one can take what they carry: `OutsidePlugin.held`.
 
@@ -96,5 +96,5 @@ The manifest, `plugins/outside` in runelite/plugin-hub (the Hub builds outside-p
 ```
 repository=https://github.com/jhmcubed/outside-plugin.git
 commit=<the full commit hash>
-warning=This plugin submits your character's name and account hash when you make your page, your levels, kill counts, collection log slots, pets, clue counts, quests, diary tiers, combat and slayer tasks and valuable drops, and your equipment, inventory, looting bag, rune pouch, item charges, skills, vitals, quests, achievement diaries, combat achievements and slayer task, and your IP address, to your outstation's relay, a server not controlled or verified by the RuneLite developers; your Outside page and outside.wiki show them publicly.
+warning=This plugin submits your character's name and account hash when you make your page, your levels, kill counts, collection log slots, pets, clue counts, quests, diary tiers, combat and slayer tasks and valuable drops, and your equipment, inventory, looting bag, rune pouch, item charges, skills, vitals, quests, achievement diaries, combat achievements and slayer task, and your IP address, to the Outside relay, a server not controlled or verified by the RuneLite developers; your Outside page and outside.wiki show them publicly.
 ```

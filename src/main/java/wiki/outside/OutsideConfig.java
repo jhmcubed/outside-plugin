@@ -24,11 +24,11 @@ public interface OutsideConfig extends Config
 
 	@ConfigItem(
 		keyName = "send",
-		name = "Send to my outstation",
-		description = "What's switched on below goes to your outstation's relay (Jace's, on Cloudflare, unless your key"
-			+ " names another), and your Outside page shows it to anyone. Off: nothing is sent anywhere.",
+		name = "Send to my Outside page",
+		description = "What's switched on below goes to the Outside relay (on Cloudflare, unless your key names another),"
+			+ " and your Outside page shows it to anyone. Off: nothing is sent anywhere.",
 		warning = "This sends what you wear and carry, your looting bag, rune pouch, skills and vitals, and your IP"
-			+ " address, to your outstation's relay, a server not controlled or verified by the RuneLite developers."
+			+ " address, to the Outside relay, a server not controlled or verified by the RuneLite developers."
 			+ " Your Outside page shows them to anyone who opens it.",
 		position = 1
 	)
