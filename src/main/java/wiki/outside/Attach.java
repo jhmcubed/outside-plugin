@@ -113,10 +113,23 @@ public final class Attach
 		return base + "/keep/" + enc(channel) + "/" + enc(what) + "?key=" + enc(key);
 	}
 
+	/** The relay's Dink route, for the plugin's own reports (11/15/2026): http(s)://…/dink/<channel>?key=…&from=plugin. */
+	public String dinkUrl()
+	{
+		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/dink/" + enc(channel) + "?") + "&from=plugin";
+	}
+
+	/** Who stands behind the page (11/15/2026): http(s)://…/proof/<channel>, anyone's. */
+	public String proofUrl()
+	{
+		return keepUrl("x").replaceFirst("/keep/.*$", "/proof/" + enc(channel));
+	}
+
 	/** The outstation's page on Outside. */
 	public String page()
 	{
-		return "https://ghillie.wiki/outside?player=" + enc(channel);
+		// (11/16/2026: outside.wiki/<name>, as Open my page opens it; it was ghillie.wiki/outside?player=)
+		return "https://outside.wiki/" + enc(channel);
 	}
 
 	private static String enc(String s)

@@ -40,7 +40,6 @@ RESTRICTED = [
     ("ScriptEventBuilder.setCanSendPackets", r"setCanSendPackets"),
 ]
 
-
 def main():
     main_src = glob.glob(os.path.join(HERE, "src", "main", "**", "*"), recursive=True)
     files = [p for p in main_src if os.path.isfile(p)]
@@ -80,7 +79,6 @@ def main():
     bad += not ok
     print("passed" if not bad else "%d to fix" % bad)
     return 1 if bad else 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

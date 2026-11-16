@@ -5,6 +5,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
+import com.google.gson.JsonNull;
 import com.google.inject.Provides;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -17,13 +18,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
-import net.runelite.api.Actor;
-import net.runelite.api.ActorSpotAnim;
 import net.runelite.api.Perspective;
-import net.runelite.api.Scene;
-import net.runelite.api.SceneTileModel;
-import net.runelite.api.SceneTilePaint;
-import net.runelite.api.Tile;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
@@ -31,9 +26,7 @@ import net.runelite.api.EnumID;
 import net.runelite.api.GameState;
 import net.runelite.api.IndexedObjectSet;
 import net.runelite.api.Item;
-import net.runelite.api.GameObject;
 import net.runelite.api.ItemContainer;
-import net.runelite.api.NPC;
 import net.runelite.api.Player;
 import net.runelite.api.Prayer;
 import net.runelite.api.Skill;
@@ -42,19 +35,14 @@ import net.runelite.api.WorldType;
 import net.runelite.api.WorldView;
 import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.coords.WorldPoint;
-import net.runelite.api.events.GameObjectDespawned;
-import net.runelite.api.events.GameObjectSpawned;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
-import net.runelite.api.events.HitsplatApplied;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.StatChanged;
+import net.runelite.client.events.NpcLootReceived;
+import net.runelite.client.game.ItemStack;
 import net.runelite.api.events.ChatMessage;
-import net.runelite.api.events.CommandExecuted;
 import net.runelite.api.events.MenuOptionClicked;
-import net.runelite.api.events.WidgetLoaded;
-import net.runelite.api.Model;
-import net.runelite.api.widgets.Widget;
 import net.runelite.client.util.Text;
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -83,28 +71,28 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Outside (11/07/2026): what you wear and carry, your looting bag, rune pouch and quiver (and since 11/14/2026 the seed box
- * and the chugging barrel), your skills, hitpoints,
- * prayer, run and special, sent to your outstation's channel on the relay (docs/protocol.md, "The game"), where your
- * Outside page draws them live beside your transmission and its chat, and keeps the last of them while you're away.
- * Nothing else is read or sent: no screen, no chat, no bank, nothing of other players, and no tile but the player's own
- * exact path for their own year's record, with its switch on (Track, 11/10/2026). Each game tick, only what changed goes
- * (vitals alone at most every few seconds), with each new item's name and price once.
- * For outside.wiki's globe, each off to begin with (11/08/2026): following (Follow), and the world with it; what
- * they're doing (Activity, through Behind); the shooting stars they find (Stars). Each only ever the player's own, or
- * a world object; never another player's.
+ * Outside: the player's own game, live on their Outside page (docs/protocol.md, "The game"), each part behind its own
+ * switch: what they wear and carry (with the looting bag, rune pouch, quiver, seed box and chugging barrel), their
+ * skills, hitpoints, prayer, run and special and the prayers on, item charges, their quests, diaries, combat
+ * achievements and slayer task (Progress), and field reports for their page's event log (Reports). Each game tick only
+ * what changed goes (vitals alone every few seconds), each new item's name and price once. Nothing more goes from the
+ * Wilderness, a PvP area or world. Never another player's anything, nor anything they type.
  */
 @PluginDescriptor(
 	name = "Outside",
-	description = "Your gear, inventory, looting bag and stats, live on your Outside page",
-	tags = {"outside", "outstation", "loadout", "inventory", "looting bag", "stream", "profile"}
+	description = "Your gear, stats, quests, diaries and slayer task, live on your own page at outside.wiki",
+	tags = {"outside", "outstation", "loadout", "inventory", "profile", "quests", "diaries", "slayer", "stream"}
 )
 public class OutsidePlugin extends Plugin
 {
 	private static final Logger log = LoggerFactory.getLogger(OutsidePlugin.class);
 	static final String VERSION = "0.2.0";
+	/** the relay a page is claimed on when there's no key yet (docs/protocol.md "Claiming a name") */
+	static final String HOME_RELAY = "https://relay.ghillie.workers.dev";
 	/** vitals alone (run energy draining as you run) go at most this often, in ticks */
 	private static final int VITALS_EVERY = 5;
+	/** quests and diaries read again at least this often, in ticks (5 minutes) */
+	private static final int PROGRESS_EVERY = 500;
 	/** the longest wait between tries to reach the relay, in seconds */
 	private static final int RETRY_MOST = 60;
 
@@ -134,27 +122,19 @@ public class OutsidePlugin extends Plugin
 
 	/** only on the client's thread (the ticks); a new connection asks for everything again through `resend` */
 	private final Kit kit = new Kit();
-	/** following, likewise only on the client's thread */
-	private final Follow follow = new Follow();
-	/** the exact path, for the player's own year (11/10/2026; Track) */
-	private final Track track = new Track();
-	/** "and my world" as it was last tick (switched off: what was sent with the world goes at once) */
-	private boolean followWorld;
-	/** what they're doing (11/08/2026), and it two minutes behind; likewise only on the client's thread */
-	private final Activity activity = new Activity();
-	private final Behind doing = new Behind("activity");
-	/** shooting stars (11/08/2026): what's to report, the stars in the scene (tile -> tier), and those that went this
-	 *  tick while logged in (a hop or a new scene clears both first, so neither counts as gone); the client's thread */
-	private final Stars stars = new Stars();
-	private final Map<WorldPoint, Integer> starsHere = new HashMap<>();
-	private final List<WorldPoint> starsWent = new ArrayList<>();
-	/** worlds where nothing goes to the globe: PvP, Deadman, high risk, Bounty Hunter (11/10/2026: not the PvP Arena's
-	 *  or Last Man Standing's, there only for those minigames, which are ordinary minigames now) */
-	private static final EnumSet<WorldType> RISKY = EnumSet.of(WorldType.PVP, WorldType.DEADMAN, WorldType.HIGH_RISK,
-		WorldType.BOUNTY);
 	private volatile boolean resend;
 	/** sending held while somewhere dangerous (the Wilderness, a PvP area or world: held()), and said so once */
 	private boolean paused;
+	// (quests and diaries, read again when what they depend on changes, or every 5 minutes; the slayer task's names
+	// looked up again when its varps change; 11/15/2026)
+	private JsonObject questsSeen, diariesSeen, slayerSeen;
+	private long progressSig = Long.MIN_VALUE;
+	private int progressAt = -1;
+	private String slayerKey;
+	/** the player's name as the game shows it, from the last tick */
+	private volatile String shownName;
+	/** the slayer task the game's just said is done, till its next line gives the count and the points */
+	private String slayerDoneTask;
 	private volatile WebSocket socket;
 	private volatile boolean open;
 	/** stopped for good until the key changes (a wrong key, or another RuneLite took over) */
@@ -162,6 +142,14 @@ public class OutsidePlugin extends Plugin
 	private Attach attach;
 	private ScheduledFuture<?> retry;
 	private int retryIn = 5;
+	/** the character logged in, as a channel has its name (null: not known yet, or logged out). 11/15/2026, Jace: logged
+	 *  into his alt, the side tab still said sburb, and the alt's kit would have gone to sburb's page: a key is now this
+	 *  character's own (kept per account), and nothing goes on a key whose page isn't the character logged in. */
+	private volatile String character = null;
+	/** each skill's real level as last seen this session, for the levels' reports */
+	private final java.util.Map<String, Integer> levelsSeen = new java.util.concurrent.ConcurrentHashMap<>();
+	/** this key is a challenger's (taking a name back, 11/15/2026): what it sends only proves the name, till it's proven */
+	private volatile boolean challenging = false;
 	private int ticksSinceSent;
 	/** the seed box's and the chugging barrel's slots as last sent by the game (onItemContainerChanged), or null */
 	private JsonElement seedsSeen, barrelSeen;
@@ -170,14 +158,7 @@ public class OutsidePlugin extends Plugin
 	 *  the account, so they're known after a restart); the item last checked, and on which tick; the client's thread */
 	private final Map<Integer, Integer> charges = new HashMap<>();
 	private int checkedItem = -1, checkedTick = -100, ticks;
-	/** (11/14/2026) the Doom of Mokhaiotl board's counts as last read (also kept on the profile), or null */
-	private JsonElement delveSeen;
-	/** (11/14/2026) the bank changed on this tick (sent a few ticks after the last change), or -1 */
-	private int bankChanged = -1;
 	private static final MediaType JSON = MediaType.parse("application/json");
-	/** the board beside the Doom of Mokhaiotl (the Delve Calculator plugin's: its scoreboard interface, each level's
-	 *  count in child 46 + 3 a level, 1 to 8, then the waves past 8) */
-	private static final int DELVE_BOARD = 920, DELVE_FIRST = 46, DELVE_STEP = 3;
 
 	@Inject
 	private ConfigManager configManager;
@@ -201,11 +182,11 @@ public class OutsidePlugin extends Plugin
 		panel = new OutsidePanel(panelHooks());
 		navButton = net.runelite.client.ui.NavigationButton.builder().tooltip("Outside").icon(tabIcon()).priority(8).panel(panel).build();
 		clientToolbar.addNavigation(navButton);
-		Attach a = Attach.parse(config.stationKey(), gson);
+		Attach a = key();
 		panel.who(a == null ? null : a.getChannel());
 		if (a != null)
 		{
-			readMotions();
+			readProof();
 		}
 		connect();
 	}
@@ -230,9 +211,9 @@ public class OutsidePlugin extends Plugin
 		}
 		if (panel != null && e.getKey().equals("stationKey"))
 		{
-			Attach a = Attach.parse(config.stationKey(), gson);
+			Attach a = key();
 			panel.who(a == null ? null : a.getChannel());
-			readMotions();
+			readProof();
 		}
 		// (a new key, or sending switched: start again; a part switched off goes as an empty field next tick)
 		if (e.getKey().equals("stationKey") || e.getKey().equals("send"))
@@ -242,53 +223,23 @@ public class OutsidePlugin extends Plugin
 			toldConnected = false;
 			connect();
 		}
-		// (the model: on, it goes now; off, it's taken down. The bank: off, it's taken down; on, it goes next time it's used)
-		if (e.getKey().equals("model"))
-		{
-			if (config.model())
-			{
-				clientThread.invokeLater(this::sendModel);
-			}
-			else
-			{
-				keep("model", null);
-			}
-		}
-		if (e.getKey().equals("bank") && !config.bank())
-		{
-			keep("bank", null);
-		}
 		resend = true;
 	}
 
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged e)
 	{
+		if (e.getGameState() == GameState.LOGGED_IN)
+		{
+			readProof();   // (proven since the last logout? the side tab says so)
+		}
 		if (e.getGameState() == GameState.LOGIN_SCREEN)
 		{
 			// (logged out: the relay drops the area and the activity with the rest; next time, the two minutes start
 			// again; the stars not reported yet are forgotten)
-			follow.forget();
-			follow.clear();
-			track.forget();
 			// (the seed box and the barrel as the game last sent them: another account may log in next)
 			seedsSeen = barrelSeen = null;
 			charges.clear();
-			delveSeen = null;
-			liveGear = gearSeen = null;
-			liveRecorded.clear();
-			autoStart = -1;
-			doing.forget();
-			doing.clear();
-			activity.forget();
-			stars.forget();
-		}
-		if (e.getGameState() == GameState.LOGIN_SCREEN || e.getGameState() == GameState.HOPPING
-			|| e.getGameState() == GameState.LOADING)
-		{
-			// (a new scene: its stars are seen again as it loads; one that went with the old one isn't gone)
-			starsHere.clear();
-			starsWent.clear();
 		}
 		if (e.getGameState() == GameState.LOGIN_SCREEN && open)
 		{
@@ -296,6 +247,11 @@ public class OutsidePlugin extends Plugin
 			off.addProperty("off", true);
 			send(off);
 			resend = true;
+		}
+		if (e.getGameState() == GameState.LOGIN_SCREEN)
+		{
+			character = null;
+			levelsSeen.clear();
 		}
 		else if (e.getGameState() == GameState.LOGGED_IN)
 		{
@@ -311,61 +267,36 @@ public class OutsidePlugin extends Plugin
 		{
 			return;
 		}
-		ticks++;
-		// (the bank: sent three ticks after it last changed, so a whole deposit goes once)
-		if (bankChanged >= 0 && ticks - bankChanged >= 3)
+		// (whose game this is: known from the first tick; another than before, the key and the side tab follow)
+		Player me = client.getLocalPlayer();
+		String whose = me == null ? null : channelName(me.getName());
+		if (me != null && me.getName() != null)
 		{
-			bankChanged = -1;
-			sendBank();
+			shownName = me.getName().replace('\u00a0', ' ');
 		}
+		if (whose != null && !whose.equals(character))
+		{
+			character = whose;
+			characterChanged();
+		}
+		ticks++;
 		if (open && resend)
 		{
 			resend = false;
 			kit.forget();
-			follow.again();
-			track.again();
-			doing.again();
 		}
-		// (the globe's: looked at every tick, the relay in reach or not, so what goes is always two minutes behind;
-		// somewhere dangerous clears it at once, before anything else)
+		// (where they are, read every tick, the relay in reach or not: somewhere dangerous holds things back at once)
 		WorldPoint at = here();
 		int x = at == null ? -1 : at.getX(), y = at == null ? -1 : at.getY(), region = at == null ? -1 : at.getRegionID();
-		boolean riskyWorld = riskyWorld();
 		boolean wild = wilderness(x, y, client.getVarbitValue(VarbitID.INSIDE_WILDERNESS) == 1);
 		boolean pvpArea = pvpArea(x, y, region, client.getVarbitValue(VarbitID.PVP_AREA_CLIENT) == 1);
-		boolean safe = globeSafe(riskyWorld, wild, pvpArea);
-		long ms = System.currentTimeMillis();
-		JsonObject where = follow(ms, safe);
-		JsonObject what = activity(ms, activitySafe(riskyWorld, wild, pvpArea, config.wilderness()));
-		JsonObject path = track(ms, at, safe);
-		look(ms, safe);
-		encounter(ms, safe);
-		liveSafe = safe && !paused;
-		liveGearTick(ms);
 		if (!open)
 		{
 			return;
 		}
-		if (where != null)
-		{
-			send(where);
-		}
-		if (what != null)
-		{
-			send(what);
-		}
-		if (path != null)
-		{
-			send(path);
-		}
-		JsonObject star = config.stars() ? stars.due(ms, config.starsCredit()) : null;
-		if (star != null)
-		{
-			send(star);
-		}
 		// (somewhere dangerous: nothing more goes till they're out, unless they've said otherwise, so nobody
 		// watching their page sees what they risk)
-		if (!config.wilderness() && held(pvpWorld(), wild, pvpArea))
+		if (held(pvpWorld(), wild, pvpArea))
 		{
 			if (!paused)
 			{
@@ -489,18 +420,6 @@ public class OutsidePlugin extends Plugin
 			}
 			m.put("charges", ch);
 		}
-		// (the live view, 11/15/2026: the animation they're doing now and the gear it's in)
-		if (config.model() && me != null && liveGear != null)
-		{
-			JsonArray an = new JsonArray();
-			an.add(me.getAnimation());
-			an.add(liveGear);
-			m.put("anim", an);
-		}
-		if (config.delve() && delveSeen != null)
-		{
-			m.put("delve", delveSeen);
-		}
 		if (config.skills())
 		{
 			JsonObject skills = new JsonObject();
@@ -518,6 +437,47 @@ public class OutsidePlugin extends Plugin
 				skills.add(s.getName(), v);
 			}
 			m.put("skills", skills);
+		}
+		if (config.progress())
+		{
+			long sig = Progress.signature(client);
+			if (sig != progressSig || progressAt < 0 || ticks - progressAt >= PROGRESS_EVERY)
+			{
+				progressSig = sig;
+				progressAt = ticks;
+				JsonObject before = questsSeen;
+				questsSeen = Progress.readQuests(client);
+				// (a quest that's done now and wasn't at the last read, this session: a field report; 11/15/2026)
+				for (String q : Progress.newlyDone(before, questsSeen))
+				{
+					report(Reports.quest(q, questsSeen.getAsJsonArray("done").size(), questsSeen.get("total").getAsInt(), myName()));
+				}
+				diariesSeen = Progress.readDiaries(client);
+			}
+			m.put("quests", questsSeen);
+			m.put("diaries", diariesSeen);
+			m.put("combat", Progress.readCombat(client));
+		}
+		else
+		{
+			// (switched off: taken off their page)
+			m.put("quests", JsonNull.INSTANCE);
+			m.put("diaries", JsonNull.INSTANCE);
+			m.put("combat", JsonNull.INSTANCE);
+		}
+		if (config.slayer())
+		{
+			String k = Progress.slayerKey(client);
+			if (!k.equals(slayerKey) || slayerSeen == null)
+			{
+				slayerKey = k;
+				slayerSeen = Progress.readSlayer(client);
+			}
+			m.put("slayer", slayerSeen);
+		}
+		else
+		{
+			m.put("slayer", JsonNull.INSTANCE);
 		}
 		if (config.vitals())
 		{
@@ -589,117 +549,6 @@ public class OutsidePlugin extends Plugin
 		return Kit.items(ids, qs);
 	}
 
-	/** Following's tick (Follow): what to send, or null. Off, what was sent goes once and nothing's kept. */
-	private JsonObject follow(long now, boolean safe)
-	{
-		// ("and my world" switched off: what went with the world goes at once, and the two minutes start again)
-		boolean world = config.followWorld();
-		boolean wasWorld = followWorld;
-		followWorld = world;
-		if (!config.follow() || (wasWorld && !world))
-		{
-			JsonObject gone = follow.clear();
-			follow.forget();
-			return gone;
-		}
-		WorldPoint at = here();
-		if (at == null)
-		{
-			return null;
-		}
-		return follow.tick(now, at.getX(), at.getY(), world ? client.getWorld() : 0, safe);
-	}
-
-	/** The exact path's tick (Track, 11/10/2026): what to send, or null. Off, what was sent is cleared once. No
-	 *  delay: it goes only to the player's own outstation, for their record. */
-	private JsonObject track(long now, WorldPoint at, boolean safe)
-	{
-		if (!config.recordPath())
-		{
-			JsonObject gone = track.clear();
-			track.forget();
-			return gone;
-		}
-		if (at == null)
-		{
-			return null;
-		}
-		return track.tick(now, at.getX(), at.getY(), at.getPlane(), client.getWorld(), safe);
-	}
-
-	/** The activity's tick (Activity, two minutes behind through Behind): what to send, or null. Off, what was sent
-	 *  goes once and nothing's kept. */
-	private JsonObject activity(long now, boolean safe)
-	{
-		if (!config.activity())
-		{
-			JsonObject gone = doing.clear();
-			doing.forget();
-			activity.forget();
-			return gone;
-		}
-		WorldPoint at = here();
-		activity.region(at == null ? -1 : at.getRegionID(), at == null ? 0 : at.getPlane());
-		activity.trial(client.getVarbitValue(VarbitID.SAILING_BT_IN_TRIAL) != 0);
-		return doing.tick(now, activity.now(now), safe);
-	}
-
-	/** The stars in the scene this tick, and those that went while they watched, into Stars. Off, nothing's kept. */
-	private void look(long now, boolean safe)
-	{
-		if (!config.stars())
-		{
-			stars.forget();
-			starsWent.clear();
-			return;
-		}
-		int world = client.getWorld();
-		for (WorldPoint p : starsWent)
-		{
-			if (!starsHere.containsKey(p))
-			{
-				stars.gone(now, world, p.getX(), p.getY());
-			}
-		}
-		starsWent.clear();
-		for (Map.Entry<WorldPoint, Integer> e : starsHere.entrySet())
-		{
-			WorldPoint p = e.getKey();
-			stars.see(now, world, p.getX(), p.getY(), e.getValue(), safe && !inWilderness(p.getX(), p.getY()));
-		}
-	}
-
-	@Subscribe
-	public void onGameObjectSpawned(GameObjectSpawned e)
-	{
-		GameObject o = e.getGameObject();
-		int tier = Stars.tier(o.getId());
-		if (tier > 0)
-		{
-			starsHere.put(o.getWorldLocation(), tier);
-		}
-	}
-
-	@Subscribe
-	public void onGameObjectDespawned(GameObjectDespawned e)
-	{
-		GameObject o = e.getGameObject();
-		if (Stars.tier(o.getId()) == 0)
-		{
-			return;
-		}
-		WorldPoint p = o.getWorldLocation();
-		starsHere.remove(p);
-		// (gone while logged in, near enough to have seen it go: mined out, or a tier mined down, which spawns the
-		// next tier on the same tile this tick and so isn't gone)
-		// (on a boat too, 11/10/2026: from where it is at sea, here())
-		WorldPoint me = client.getGameState() == GameState.LOGGED_IN ? here() : null;
-		if (me != null && me.distanceTo(p) <= 32)
-		{
-			starsWent.add(p);
-		}
-	}
-
 	/** Their own experience (the activity's skilling). */
 	/** The seed box's and the chugging barrel's contents as the game sends them (when one's checked or filled, or the
 	 *  barrel's bank loadout opens), kept for read(): the Hub's Seed Box plugin reads the seed box the same way. */
@@ -714,13 +563,9 @@ public class OutsidePlugin extends Plugin
 		{
 			barrelSeen = slots(e.getItemContainer(), 5);
 		}
-		else if (e.getContainerId() == InventoryID.BANK && config.bank())
-		{
-			bankChanged = ticks;
-		}
 	}
 
-	// ---- (11/14/2026) charges, the delve board, the bank and the model: Kept
+	// ---- (11/14/2026) charges: Kept
 
 	/** An item checked ("Check", "Inspect" and the like): the next charges the game tells of are its. */
 	@Subscribe
@@ -738,6 +583,26 @@ public class OutsidePlugin extends Plugin
 	@Subscribe
 	public void onChatMessage(ChatMessage e)
 	{
+		if (e.getType() == ChatMessageType.GAMEMESSAGE || e.getType() == ChatMessageType.SPAM)
+		{
+			String said = Text.removeTags(e.getMessage());
+			report(Reports.fromChat(said, myName()));
+			// (a slayer task's end comes in two lines: the task, then the count and the points; 11/15/2026)
+			String task = Reports.slayerTask(said);
+			if (task != null)
+			{
+				slayerDoneTask = task;
+			}
+			else if (slayerDoneTask != null)
+			{
+				JsonObject done = Reports.slayerDone(said, slayerDoneTask, myName());
+				if (done != null)
+				{
+					slayerDoneTask = null;
+					report(done);
+				}
+			}
+		}
 		if (!config.charges() || (e.getType() != ChatMessageType.GAMEMESSAGE && e.getType() != ChatMessageType.SPAM))
 		{
 			return;
@@ -779,311 +644,6 @@ public class OutsidePlugin extends Plugin
 		}
 	}
 
-	/** The board beside the Doom of Mokhaiotl opened: its counts read (as the Delve Calculator plugin reads them). */
-	@Subscribe
-	public void onWidgetLoaded(WidgetLoaded e)
-	{
-		if (e.getGroupId() == DELVE_BOARD && config.delve())
-		{
-			clientThread.invokeLater(this::readDelve);
-		}
-	}
-
-	private void readDelve()
-	{
-		JsonArray counts = new JsonArray();
-		boolean any = false;
-		for (int i = 0; i < 9; i++)
-		{
-			Widget w = client.getWidget(DELVE_BOARD, DELVE_FIRST + i * DELVE_STEP);
-			String t = w == null || w.getText() == null ? "" : w.getText().replaceAll("[^0-9]", "");
-			int n = 0;
-			if (!t.isEmpty() && t.length() < 10)
-			{
-				n = Integer.parseInt(t);
-				any = true;
-			}
-			counts.add(n);
-		}
-		if (any)
-		{
-			delveSeen = counts;
-			saveKept();
-		}
-	}
-
-	/** ::outsidemodel: the model again, as they look now. */
-	@Subscribe
-	public void onCommandExecuted(CommandExecuted e)
-	{
-		if ("outsideforget".equalsIgnoreCase(e.getCommand()))
-		{
-			String name = motionName(e.getArguments());
-			if (name == null || e.getArguments().length == 0)
-			{
-				say("which motion? ::outsideforget and its name");
-				return;
-			}
-			keep("motion", name, null);
-			say("taking the motion \"" + name + "\" off your page");
-			return;
-		}
-		if ("outsidemotion".equalsIgnoreCase(e.getCommand()))
-		{
-			if (config.model())
-			{
-				String name = motionName(e.getArguments());
-				if (e.getArguments().length > 0 && name == null)
-				{
-					say("a motion's name: up to 24 letters, numbers, spaces, - or _");
-					return;
-				}
-				armMotion(name);
-			}
-			else
-			{
-				say("switch on \"My character's model on my page\" in the plugin's settings first");
-			}
-			return;
-		}
-		if ("outsidemodel".equalsIgnoreCase(e.getCommand()))
-		{
-			if (config.model())
-			{
-				sendModel();
-			}
-			else
-			{
-				say("switch on \"My character's model on my page\" in the plugin's settings first");
-			}
-		}
-	}
-
-	/** The character's model as it is now (the client's thread). */
-	// ---- the live view (11/15/2026, Jace: "allow them to have a static set of gear/animation of their choosing while also
-	// having the ability for the viewer to show the 'live view' that shows what they are currently wearing and what they
-	// are doing in game"; "yes, build the live view that way"): the model in the gear they wear now, sent a few seconds
-	// after it changes (at most every LIVE_EVERY), its gear marked; each animation they do recorded the first time it's
-	// seen in that gear (one at a time, at most one starting every LIVE_GAP), and them standing (idle); the animation
-	// they're doing now goes with the game's fields ("anim"), so the page plays the one that matches. Only with the model
-	// switch on, never anywhere dangerous, never while a capture of theirs is recording.
-	private static final long LIVE_EVERY = 20_000L, LIVE_GAP = 6_000L;
-	private String liveGear, gearSeen;
-	private long gearAt, liveSentAt, liveAutoAt;
-	private boolean liveSafe, liveDue;
-	private final Set<String> liveRecorded = new HashSet<>();
-	private int autoStart = -1, autoLast, autoCount, autoPetCount;
-	private String autoAnim;
-	private JsonObject autoBase, autoPet;
-	private final List<String> autoFrames = new ArrayList<>(), autoPetFrames = new ArrayList<>();
-
-	/** The worn gear's mark: its items, hashed. */
-	private String gearMark()
-	{
-		ItemContainer w = client.getItemContainer(InventoryID.WORN);
-		java.util.zip.CRC32 crc = new java.util.zip.CRC32();
-		if (w != null)
-		{
-			for (Item it : w.getItems())
-			{
-				int id = it.getId();
-				crc.update(new byte[]{(byte) (id >> 24), (byte) (id >> 16), (byte) (id >> 8), (byte) id});
-			}
-		}
-		return Long.toHexString(crc.getValue());
-	}
-
-	private void liveGearTick(long now)
-	{
-		if (!config.model() || !open || !liveSafe)
-		{
-			return;
-		}
-		String g = gearMark();
-		if (!g.equals(gearSeen))
-		{
-			gearSeen = g;
-			gearAt = now;
-			liveDue = true;
-		}
-		// (a few seconds after the gear settles, and not more often than LIVE_EVERY)
-		if (liveDue && now - gearAt >= 3_000 && now - liveSentAt >= LIVE_EVERY && motionArmed < 0 && autoStart < 0)
-		{
-			Player me = client.getLocalPlayer();
-			Model m = me == null ? null : me.getModel();
-			if (m == null)
-			{
-				return;
-			}
-			JsonObject player = modelJson(m);
-			Model pet = petModel();
-			JsonObject o = wholeModel(player, pet == null ? null : modelJson(pet), null, null);
-			liveDue = false;
-			liveSentAt = now;
-			if (!g.equals(liveGear))
-			{
-				liveRecorded.clear();
-			}
-			liveGear = g;
-			keepLive("live", null, o);
-		}
-	}
-
-	/** Each client cycle: an animation not yet recorded in this gear (or them standing), recorded in the background. */
-	private void liveRecordTick(Player me, int cycle)
-	{
-		if (!config.model() || !open || !liveSafe || liveGear == null || motionArmed >= 0)
-		{
-			autoStart = -1;
-			return;
-		}
-		if (autoStart < 0)
-		{
-			int anim = me.getAnimation();
-			boolean standing = anim == -1 && me.getPoseAnimation() == me.getIdlePoseAnimation();
-			String key = anim != -1 ? String.valueOf(anim) : standing ? "idle" : null;
-			long now = System.currentTimeMillis();
-			if (key == null || liveRecorded.contains(key) || now - liveAutoAt < LIVE_GAP)
-			{
-				return;
-			}
-			Model base = me.getModel();
-			if (base == null)
-			{
-				return;
-			}
-			Snap bs = snap(base, true);
-			List<Fx> bfx = effects(me, null);
-			autoCount = ownOf(bs, bfx);
-			autoBase = Kept.trim(bs.json, autoCount);
-			autoFx = new FxTrack();
-			Model pet = petModel();
-			autoPetCount = pet == null ? 0 : pet.getVerticesCount();
-			autoPet = pet == null ? null : modelJson(pet);
-			autoAnim = key;
-			autoStart = cycle;
-			autoLast = cycle - MOTION_EVERY;
-			autoFrames.clear();
-			autoPetFrames.clear();
-			liveAutoAt = now;
-		}
-		if (cycle - autoLast < MOTION_EVERY)
-		{
-			return;
-		}
-		autoLast = cycle;
-		boolean idle = "idle".equals(autoAnim);
-		// (standing: let go the moment they move; an animation: until it ends)
-		if (idle && (me.getAnimation() != -1 || me.getPoseAnimation() != me.getIdlePoseAnimation()))
-		{
-			autoStart = -1;
-			return;
-		}
-		Model m = me.getModel();
-		Snap ms = m == null ? null : snap(m, false);
-		List<Fx> mfx = ms == null ? null : effects(me, autoFx.models.keySet());
-		if (ms != null && ownOf(ms, mfx) == autoCount)
-		{
-			autoFrames.add(Kept.frame(ms.x, ms.y, ms.z, autoCount));
-			autoFx.add(mfx);
-			Model p = autoPet == null ? null : petModel();
-			autoPetFrames.add(p != null && p.getVerticesCount() == autoPetCount ? Kept.frame(p.getVerticesX(), p.getVerticesY(), p.getVerticesZ(), p.getVerticesCount()) : null);
-		}
-		boolean done = autoFrames.size() >= MOTION_MOST
-			|| (idle ? cycle - autoStart >= MOTION_IDLE : !autoAnim.equals(String.valueOf(me.getAnimation())) && autoFrames.size() > 2);
-		if (!done)
-		{
-			return;
-		}
-		autoStart = -1;
-		if (autoFrames.size() < 3)
-		{
-			return;
-		}
-		liveRecorded.add(autoAnim);
-		JsonObject frames = Kept.frames(autoFrames, 1000.0 / (MOTION_EVERY * 20));
-		autoFx.into(frames);
-		JsonObject petFrames = autoPet != null && !autoPetFrames.contains(null) ? Kept.frames(autoPetFrames, 1000.0 / (MOTION_EVERY * 20)) : null;
-		keepLive("livemotion", autoAnim, wholeModel(autoBase, autoPet, frames, petFrames));
-	}
-
-	/** The live view's uploads (the relay's /keep/<channel>/live and /livemotion), quietly: nothing said in the chat. */
-	private void keepLive(String what, String anim, JsonObject body)
-	{
-		Attach a = attach != null ? attach : Attach.parse(config.stationKey(), gson);
-		if (a == null || !config.send() || liveGear == null)
-		{
-			return;
-		}
-		String url = a.keepUrl(what) + "&gear=" + liveGear + (anim == null ? "" : "&anim=" + anim);
-		http.newCall(new Request.Builder().url(url).header("User-Agent", "outside-plugin/" + VERSION).post(RequestBody.create(JSON, gson.toJson(body))).build()).enqueue(new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException ex)
-			{
-				log.debug("outside: live {} failed", what, ex);
-			}
-
-			@Override
-			public void onResponse(Call call, Response r)
-			{
-				r.close();
-			}
-		});
-	}
-
-	// ---- the encounter (11/15/2026, Jace: "build what you think is best" under the subject's form): the last boss they
-	// fought, its model, on their page as the fight ends; never from anywhere dangerous; each boss at most once every
-	// ENCOUNTER_EVERY; only with the model switch on
-	private static final long ENCOUNTER_EVERY = 30 * 60_000L, ENCOUNTER_OVER = 20_000L;
-	private final Map<String, Long> encounterSent = new HashMap<>();
-	private JsonObject encounterModel;
-	private String encounterName;
-	private long encounterAt;
-
-	private void encounter(long now, boolean safe)
-	{
-		if (!config.model() || !open)
-		{
-			return;
-		}
-		if (!safe)
-		{
-			encounterModel = null;   // (nothing from anywhere dangerous: what was caught there is let go)
-			encounterName = null;
-			return;
-		}
-		Player me = client.getLocalPlayer();
-		Actor t = me == null ? null : me.getInteracting();
-		String boss = t instanceof NPC && t.getName() != null ? Activity.BOSSES.get(t.getName()) : null;
-		if (boss != null && !Activity.WILDERNESS_BOSSES.contains(boss))
-		{
-			if (!boss.equals(encounterName))
-			{
-				Long last = encounterSent.get(boss);
-				Model m = ((NPC) t).getModel();
-				if ((last == null || now - last >= ENCOUNTER_EVERY) && m != null)
-				{
-					// (written out at once: one shared model object for anything animated)
-					encounterModel = wholeModel(modelJson(m), null, null, null);
-					encounterName = boss;
-				}
-			}
-			encounterAt = now;
-			return;
-		}
-		if (encounterModel != null && now - encounterAt >= ENCOUNTER_OVER)
-		{
-			JsonObject o = new JsonObject();
-			o.addProperty("name", encounterName);
-			o.add("model", encounterModel);
-			encounterSent.put(encounterName, now);
-			keep("encounter", o);
-			encounterModel = null;
-			encounterName = null;
-		}
-	}
-
 	/** The side tab's icon: a lime ✼, drawn here (no picture to ship). */
 	private static java.awt.image.BufferedImage tabIcon()
 	{
@@ -1107,80 +667,59 @@ public class OutsidePlugin extends Plugin
 	{
 		return new OutsidePanel.Hooks()
 		{
-			@Override
-			public void capture(String name)
-			{
-				clientThread.invokeLater(() ->
-				{
-					if (!config.model())
-					{
-						panel.status("switch on \"My character's model on my page\" in the plugin's settings first");
-						return;
-					}
-					if (client.getLocalPlayer() == null)
-					{
-						panel.status("log in first");
-						return;
-					}
-					String n = name.isEmpty() ? null : motionName(name.split("\\s+"));
-					if (!name.isEmpty() && n == null)
-					{
-						panel.status("a name: up to 24 letters, numbers, spaces, - or _");
-						return;
-					}
-					armMotion(n);
-				});
-			}
 
 			@Override
 			public void refresh()
 			{
-				readMotions();
+				readProof();
 			}
 
 			@Override
-			public void first(String name)
+			public void claim()
 			{
-				Attach a = Attach.parse(config.stationKey(), gson);
-				if (a == null)
+				clientThread.invokeLater(() ->
 				{
-					return;
-				}
-				String url = a.keepUrl("motions") + "&first=" + java.net.URLEncoder.encode(name, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20");
-				http.newCall(new Request.Builder().url(url).header("User-Agent", "outside-plugin/" + VERSION).post(RequestBody.create(JSON, "")).build()).enqueue(new Callback()
-				{
-					@Override
-					public void onFailure(Call call, IOException ex)
+					if (client.getLocalPlayer() == null || client.getLocalPlayer().getName() == null)
 					{
-						panel.status("the relay's out of reach");
+						panel.claiming(false, "log in first: your page is named after the character you're logged in as");
+						return;
 					}
-
-					@Override
-					public void onResponse(Call call, Response r)
+					String shown = client.getLocalPlayer().getName();
+					String name = channelName(shown);
+					if (name == null)
 					{
-						r.close();
-						panel.status(name.isEmpty() ? "your page shows your model standing still first" : "your page shows \"" + name + "\" first");
+						panel.claiming(false, "\"" + shown + "\" can't be a page's name");
+						return;
 					}
+					long hash = client.getAccountHash();
+					claimPage(name, hash == -1 ? null : Long.toString(hash));
 				});
 			}
 
 			@Override
-			public void forget(String name)
+			public void copyKey()
 			{
-				keep("motion", name, null);
-			}
-
-			@Override
-			public void removeModel()
-			{
-				keep("model", null);
-				panel.status("taking your model off your page");
+				Attach a = key();
+				if (a == null)
+				{
+					panel.keyStatus("no key for this character yet");
+					return;
+				}
+				try
+				{
+					java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new java.awt.datatransfer.StringSelection(stationKey().trim()), null);
+					panel.keyStatus("copied: paste it into the outstation's first screen");
+				}
+				catch (IllegalStateException | java.awt.HeadlessException ex)
+				{
+					panel.keyStatus("the clipboard's busy: try again");
+				}
 			}
 
 			@Override
 			public void openPage()
 			{
-				Attach a = Attach.parse(config.stationKey(), gson);
+				Attach a = key();
 				if (a != null)
 				{
 					net.runelite.client.util.LinkBrowser.browse("https://outside.wiki/" + java.net.URLEncoder.encode(a.getChannel(), java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20"));
@@ -1189,686 +728,165 @@ public class OutsidePlugin extends Plugin
 		};
 	}
 
-	/** The motions on their page and the one it shows first, into the side tab. */
-	private void readMotions()
+	/** The station key for the character logged in: their own (kept with their account by "Make my Outside page"), else
+	 *  the one in the plugin's settings. */
+	private String stationKey()
 	{
-		Attach a = Attach.parse(config.stationKey(), gson);
+		String own = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "stationKey");
+		return own != null && !own.trim().isEmpty() ? own : config.stationKey();
+	}
+
+	/** The key read, or null: none, or one whose page isn't the character logged in (another account's). */
+	private Attach key()
+	{
+		Attach a = Attach.parse(stationKey(), gson);
+		String c = character;
+		return a != null && c != null && !a.getChannel().toLowerCase(java.util.Locale.ROOT).equals(c) ? null : a;
+	}
+
+	/** Another character logged in (or the first, once its name is known): the side tab, and the relay on their key. */
+	private void characterChanged()
+	{
+		progressAt = -1;
+		questsSeen = null;
+		slayerKey = null;
+		slayerSeen = null;
+		Attach any = Attach.parse(stationKey(), gson), a = key();
+		if (panel != null)
+		{
+			panel.who(a == null ? null : a.getChannel());
+			panel.otherKey(any != null && a == null ? any.getChannel() : null, character);
+			readProof();
+		}
+		if (attach != null && (a == null || !a.getChannel().equals(attach.getChannel())))
+		{
+			close("another character");
+		}
+		stopped = false;
+		toldConnected = false;
+		connect();
+	}
+
+	/** A player's name as a channel has it: lower case, the spaces, hyphens and underscores the game treats alike taken
+	 *  out (its names use a no-break space), 1 to 12 letters or numbers; null when it can't be one. */
+	static String channelName(String shown)
+	{
+		if (shown == null)
+		{
+			return null;
+		}
+		String n = shown.toLowerCase(java.util.Locale.ROOT).replaceAll("[\\s\u00a0_-]", "");
+		return n.matches("[a-z0-9]{1,12}") ? n : null;
+	}
+
+	/** Claims a page for the name (docs/protocol.md "Claiming a name"): the key that comes back goes in the settings,
+	 *  which connects as any key does (onConfigChanged). */
+	private void claimPage(String name, String account)
+	{
+		panel.claiming(true, null);
+		JsonObject body = new JsonObject();
+		body.addProperty("player", name);
+		if (account != null)
+		{
+			body.addProperty("account", account);
+		}
+		Request req = new Request.Builder().url(HOME_RELAY + "/claim").header("User-Agent", "outside-plugin/" + VERSION)
+			.post(RequestBody.create(JSON, gson.toJson(body))).build();
+		http.newCall(req).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				panel.claiming(false, "the relay's out of reach: try again in a bit");
+			}
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				try (Response res = r)
+				{
+					String text = res.body() != null ? res.body().string() : "";
+					JsonObject o = null;
+					try
+					{
+						o = gson.fromJson(text, JsonObject.class);
+					}
+					catch (RuntimeException ignored)
+					{
+					}
+					if (res.code() == 200 && o != null && o.has("code") && Attach.parse(o.get("code").getAsString(), gson) != null)
+					{
+						boolean back = o.has("proof") && "challenging".equals(o.get("proof").getAsString());
+						challenging = back;
+						configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "stationKey", o.get("code").getAsString());
+						if (back)
+						{
+							// (taking a name back: someone else claimed it first and hasn't proven it)
+							panel.claiming(false, "outside.wiki/" + name + " was claimed by someone who hasn't proven it. Gain any experience,"
+								+ " then log out: when the official hiscores show it, the page is yours.");
+							say("you're taking back outside.wiki/" + name + ": gain any experience, then log out");
+						}
+						else
+						{
+							panel.claiming(false, "your page: outside.wiki/" + name + " (marked unproven till it's proven yours)");
+							say("your Outside page is made: outside.wiki/" + name);
+						}
+						return;
+					}
+					if (res.code() == 409)
+					{
+						panel.claiming(false, "outside.wiki/" + name + " is proven or vouched for already. If it's yours, paste its station key in the plugin's settings.");
+						return;
+					}
+					String why = o != null && o.has("error") ? o.get("error").getAsString() : "the relay said " + res.code();
+					panel.claiming(false, why);
+				}
+				catch (IOException ex)
+				{
+					panel.claiming(false, "the relay's out of reach: try again in a bit");
+				}
+			}
+		});
+	}
+
+	/** Whether their page is proven theirs, into the side tab (docs/protocol.md "Proving a name"). */
+	private void readProof()
+	{
+		Attach a = key();
 		if (a == null || panel == null)
 		{
-			return;
-		}
-		String url = a.keepUrl("motions").replaceFirst("\\?key=[^&]*", "?code=");
-		http.newCall(new Request.Builder().url(url).header("User-Agent", "outside-plugin/" + VERSION).build()).enqueue(new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException ex)
-			{
-				panel.showMotions(null, "");
-			}
-
-			@Override
-			public void onResponse(Call call, Response r)
-			{
-				try
-				{
-					String t = r.body() == null ? "" : r.body().string();
-					JsonObject o = gson.fromJson(t, JsonObject.class);
-					List<OutsidePanel.Motion> list = new ArrayList<>();
-					if (o != null && o.has("motions"))
-					{
-						for (JsonElement e : o.getAsJsonArray("motions"))
-						{
-							JsonObject m = e.getAsJsonObject();
-							list.add(new OutsidePanel.Motion(m.get("name").getAsString(), m.has("frames") ? m.get("frames").getAsInt() : 0));
-						}
-					}
-					panel.showMotions(list, o != null && o.has("first") && !o.get("first").isJsonNull() ? o.get("first").getAsString() : (list.stream().anyMatch(m -> "idle".equals(m.name)) ? "idle" : ""));
-				}
-				catch (IOException | RuntimeException ex)
-				{
-					panel.showMotions(null, "");
-				}
-				finally
-				{
-					r.close();
-				}
-			}
-		});
-	}
-
-	private void sendModel()
-	{
-		Player me = client.getLocalPlayer();
-		Model m = me == null ? null : me.getModel();
-		if (m == null)
-		{
-			say("your model isn't there to send yet: try ::outsidemodel in a moment");
-			return;
-		}
-		// (each written out the moment it's read: the client hands out one shared model for anything animated, so reading
-		// the pet's after the player's overwrote the player's; 11/15/2026, Jace saw only his pet)
-		Snap snap = snap(m, true);
-		// (11/15/2026: their effects as they are now, each a model of its own, and the ground round them if they let it go)
-		List<Fx> fx = effects(me, null);
-		JsonObject player = Kept.trim(snap.json, ownOf(snap, fx));
-		addEffects(player, fx);
-		addGround(player, me);
-		Model pet = petModel();
-		keep("model", wholeModel(player, pet == null ? null : modelJson(pet), null, null));
-	}
-
-	/** The pet following them (11/15/2026, Jace: "one thing i would like to have it do is capture the pet"), or null. */
-	private Model petModel()
-	{
-		NPC pet = client.getFollower();
-		return pet == null ? null : pet.getModel();
-	}
-
-	// ---- effects and the ground (11/15/2026, Jace: "can you build the effects (spot animations) and the ground into the
-	// model viewer/capturer?"). Effects: each spot animation on them (a special attack's, a teleport's, an emote's), its
-	// own model raised by its height, kept apart from theirs (Kept.ownVertices: the client may merge them into the
-	// player's model), so the page can draw them, and a motion's frames carry them frame by frame. The ground: the tiles
-	// round them (GROUND_TILES each way) as the scene has them, painted and shaped, turned into their model's own space;
-	// only with "The ground under my model" on, and only on a capture they ask for (never the live view's own).
-
-	private static final int GROUND_TILES = 5, FX_MOST = 4, FX_MODELS = 8;
-
-	/** A model read at once (the client's model object is shared): its vertices copied, and as JSON if asked. */
-	private static final class Snap
-	{
-		JsonObject json;
-		float[] x, z, y;
-		int n;
-	}
-
-	private Snap snap(Model m, boolean json)
-	{
-		Snap s = new Snap();
-		s.n = m.getVerticesCount();
-		s.x = java.util.Arrays.copyOf(m.getVerticesX(), s.n);
-		s.y = java.util.Arrays.copyOf(m.getVerticesY(), s.n);
-		s.z = java.util.Arrays.copyOf(m.getVerticesZ(), s.n);
-		s.json = json ? modelJson(m) : null;
-		return s;
-	}
-
-	/** One effect on them now: its key (id, vertices, faces), its vertices (raised by its height), and its model as
-	 *  JSON unless it's one already known. */
-	private static final class Fx
-	{
-		String key;
-		JsonObject json;
-		float[] x, y, z;
-		int n;
-	}
-
-	private List<Fx> effects(Player me, Set<String> known)
-	{
-		List<Fx> out = new ArrayList<>();
-		if (me.getSpotAnims() == null)
-		{
-			return out;
-		}
-		for (ActorSpotAnim sa : me.getSpotAnims())
-		{
-			if (out.size() >= FX_MOST)
-			{
-				break;
-			}
-			Model m = sa.getModel();
-			if (m == null || m.getVerticesCount() <= 0 || m.getFaceCount() <= 0)
-			{
-				continue;
-			}
-			Fx f = new Fx();
-			f.n = m.getVerticesCount();
-			f.key = sa.getId() + "." + f.n + "." + m.getFaceCount();
-			f.x = java.util.Arrays.copyOf(m.getVerticesX(), f.n);
-			f.y = java.util.Arrays.copyOf(m.getVerticesY(), f.n);
-			f.z = java.util.Arrays.copyOf(m.getVerticesZ(), f.n);
-			for (int i = 0; i < f.n; i++)
-			{
-				f.y[i] -= sa.getHeight();
-			}
-			if (known == null || !known.contains(f.key))
-			{
-				f.json = Kept.model(f.x, f.y, f.z, f.n, m.getFaceIndices1(), m.getFaceIndices2(), m.getFaceIndices3(), m.getFaceCount(),
-					m.getFaceColors1(), m.getFaceColors2(), m.getFaceColors3(), m.getUnlitFaceColors(), m.getFaceTransparencies(),
-					m.getFaceTextures(), m.getFaceRenderPriorities(), m.getTextureFaces(), m.getTexIndices1(), m.getTexIndices2(),
-					m.getTexIndices3());
-			}
-			out.add(f);
-		}
-		return out;
-	}
-
-	/** How many of the snapped model's vertices are the player's own (the effects merged after them, in either order). */
-	private static int ownOf(Snap s, List<Fx> fx)
-	{
-		if (fx == null || fx.isEmpty())
-		{
-			return s.n;
-		}
-		for (int pass = 0; pass < 2; pass++)
-		{
-			List<Fx> l = new ArrayList<>(fx);
-			if (pass == 1)
-			{
-				java.util.Collections.reverse(l);
-			}
-			List<float[]> xs = new ArrayList<>(), zs = new ArrayList<>();
-			int[] counts = new int[l.size()];
-			for (int k = 0; k < l.size(); k++)
-			{
-				xs.add(l.get(k).x);
-				zs.add(l.get(k).z);
-				counts[k] = l.get(k).n;
-			}
-			int own = Kept.ownVertices(s.x, s.z, s.n, xs, zs, counts);
-			if (own != s.n)
-			{
-				return own;
-			}
-		}
-		return s.n;
-	}
-
-	/** The still capture's effects: "fx", each a model. */
-	private static void addEffects(JsonObject o, List<Fx> fx)
-	{
-		JsonArray a = new JsonArray();
-		for (Fx f : fx)
-		{
-			if (f.json != null)
-			{
-				a.add(f.json);
-			}
-		}
-		if (a.size() > 0)
-		{
-			o.add("fx", a);
-		}
-	}
-
-	/** A motion's effects, frame by frame: each effect's model once ("m", by its key), then each frame's effects there,
-	 *  their key and their vertices then ("f", one list a frame). */
-	private static final class FxTrack
-	{
-		final Map<String, JsonObject> models = new LinkedHashMap<>();
-		final List<JsonArray> rows = new ArrayList<>();
-
-		void add(List<Fx> fx)
-		{
-			JsonArray row = new JsonArray();
-			for (Fx f : fx)
-			{
-				if (!models.containsKey(f.key))
-				{
-					if (f.json == null || models.size() >= FX_MODELS)
-					{
-						continue;
-					}
-					models.put(f.key, f.json);
-				}
-				JsonObject e = new JsonObject();
-				e.addProperty("k", f.key);
-				e.addProperty("v", Kept.frame(f.x, f.y, f.z, f.n));
-				row.add(e);
-			}
-			rows.add(row);
-		}
-
-		void into(JsonObject frames)
-		{
-			if (models.isEmpty())
-			{
-				return;
-			}
-			JsonObject fx = new JsonObject(), m = new JsonObject();
-			models.forEach(m::add);
-			JsonArray f = new JsonArray();
-			rows.forEach(f::add);
-			fx.add("m", m);
-			fx.add("f", f);
-			frames.add("fx", fx);
-		}
-	}
-
-	/** The ground round them, with "The ground under my model" on: "ground", a model in theirs's own space. */
-	private void addGround(JsonObject o, Player me)
-	{
-		if (!config.ground())
-		{
-			return;
-		}
-		try
-		{
-			JsonObject g = groundJson(me);
-			if (g != null && g.getAsJsonArray("f").size() > 0)
-			{
-				o.add("ground", g);
-			}
-		}
-		catch (RuntimeException ex)
-		{
-			log.debug("outside: the ground", ex);
-		}
-	}
-
-	private JsonObject groundJson(Player me)
-	{
-		WorldView wv = me.getWorldView();
-		LocalPoint lp = me.getLocalLocation();
-		if (wv == null || lp == null)
-		{
-			return null;
-		}
-		Scene scene = wv.getScene();
-		int plane = wv.getPlane();
-		Tile[][][] tiles = scene.getTiles();
-		int[][][] hs = wv.getTileHeights();
-		int px = lp.getX(), py = lp.getY(), ph = Perspective.getTileHeight(client, lp, plane);
-		// (the client turns a model by its orientation as it draws it (Perspective.modelToCanvas): x' = x cos + z sin,
-		// z' = z cos - x sin; the ground's turned back the other way into the model's own space)
-		double ang = me.getOrientation() * Math.PI / 1024.0, cs = Math.cos(ang), sn = Math.sin(ang);
-		int sx0 = lp.getSceneX(), sy0 = lp.getSceneY();
-		List<int[]> tris = new ArrayList<>();
-		for (int dx = -GROUND_TILES; dx <= GROUND_TILES; dx++)
-		{
-			for (int dy = -GROUND_TILES; dy <= GROUND_TILES; dy++)
-			{
-				int x = sx0 + dx, y = sy0 + dy;
-				if (x < 0 || y < 0 || x >= tiles[plane].length - 1 || y >= tiles[plane][x].length - 1)
-				{
-					continue;
-				}
-				Tile t = tiles[plane][x][y];
-				if (t == null)
-				{
-					continue;
-				}
-				int bx = x * 128, by = y * 128;
-				SceneTilePaint p = t.getSceneTilePaint();
-				if (p != null)
-				{
-					int tex = p.getTexture();
-					int[] sw = {bx, hs[plane][x][y], by}, se = {bx + 128, hs[plane][x + 1][y], by};
-					int[] ne = {bx + 128, hs[plane][x + 1][y + 1], by + 128}, nw = {bx, hs[plane][x][y + 1], by + 128};
-					tris.add(tri(ne, nw, se, p.getNeColor(), p.getNwColor(), p.getSeColor(), tex, bx, by, px, py, ph, cs, sn));
-					tris.add(tri(sw, se, nw, p.getSwColor(), p.getSeColor(), p.getNwColor(), tex, bx, by, px, py, ph, cs, sn));
-				}
-				SceneTileModel tm = t.getSceneTileModel();
-				if (tm != null && tm.getFaceX() != null)
-				{
-					int[] fa = tm.getFaceX(), fb = tm.getFaceY(), fc = tm.getFaceZ(), vx = tm.getVertexX(), vy = tm.getVertexY(), vz = tm.getVertexZ();
-					int[] ca = tm.getTriangleColorA(), cb = tm.getTriangleColorB(), cc = tm.getTriangleColorC(), tt = tm.getTriangleTextureId();
-					for (int i = 0; i < fa.length; i++)
-					{
-						int[] a = {vx[fa[i]], vy[fa[i]], vz[fa[i]]}, b = {vx[fb[i]], vy[fb[i]], vz[fb[i]]}, c = {vx[fc[i]], vy[fc[i]], vz[fc[i]]};
-						tris.add(tri(a, b, c, ca[i], cb[i], cc[i], tt == null ? -1 : tt[i], bx, by, px, py, ph, cs, sn));
-					}
-				}
-			}
-		}
-		return Kept.ground(tris);
-	}
-
-	/** One of the ground's triangles as Kept.ground takes it: each corner (x, height, the scene's y) moved into the
-	 *  player's model space, its colours, its texture and each corner's place on its tile as u, v. */
-	private static int[] tri(int[] a, int[] b, int[] c, int ca, int cb, int cc, int tex, int bx, int by, int px, int py, int ph, double cs, double sn)
-	{
-		int[] q = new int[19];
-		int[][] k = {a, b, c};
-		for (int i = 0; i < 3; i++)
-		{
-			double dx = k[i][0] - px, dz = k[i][2] - py;
-			q[i * 3] = (int) Math.round(dx * cs - dz * sn);
-			q[i * 3 + 1] = k[i][1] - ph;
-			q[i * 3 + 2] = (int) Math.round(dz * cs + dx * sn);
-			q[13 + i * 2] = Math.round((k[i][0] - bx) / 128f * 4096);
-			q[14 + i * 2] = Math.round((k[i][2] - by) / 128f * 4096);
-		}
-		q[9] = ca;
-		q[10] = cb;
-		q[11] = cc;
-		q[12] = tex;
-		return q;
-	}
-
-	private JsonObject modelJson(Model m)
-	{
-		// (11/15/2026: the game's own lighting and textures too, for the page to draw it as the game does)
-		return Kept.model(m.getVerticesX(), m.getVerticesY(), m.getVerticesZ(), m.getVerticesCount(),
-			m.getFaceIndices1(), m.getFaceIndices2(), m.getFaceIndices3(), m.getFaceCount(),
-			m.getFaceColors1(), m.getFaceColors2(), m.getFaceColors3(), m.getUnlitFaceColors(), m.getFaceTransparencies(),
-			m.getFaceTextures(), m.getFaceRenderPriorities(), m.getTextureFaces(), m.getTexIndices1(), m.getTexIndices2(),
-			m.getTexIndices3());
-	}
-
-	/** The player's model, their pet's beside it (if one's following), each with the frames of a motion if one was
-	 *  recorded, every texture either uses and the brightness the player has the game at (the palette's). */
-	private JsonObject wholeModel(JsonObject o, JsonObject petJson, JsonObject frames, JsonObject petFrames)
-	{
-		JsonObject pet = petJson;
-		if (frames != null)
-		{
-			o.add("frames", frames);
-		}
-		if (pet != null)
-		{
-			JsonObject p = pet;
-			if (petFrames != null)
-			{
-				p.add("frames", petFrames);
-			}
-			o.add("pet", p);
-		}
-		// each texture it uses, as the client has it (128 x 128, 0 a see-through texel), a PNG each
-		JsonObject pics = new JsonObject();
-		List<JsonObject> parts = new ArrayList<>();
-		parts.add(o);
-		if (pet != null)
-		{
-			parts.add(o.getAsJsonObject("pet"));
-		}
-		// (11/15/2026: the effects' and the ground's textures too)
-		if (o.has("ground"))
-		{
-			parts.add(o.getAsJsonObject("ground"));
-		}
-		if (o.has("fx"))
-		{
-			o.getAsJsonArray("fx").forEach(e -> parts.add(e.getAsJsonObject()));
-		}
-		if (o.has("frames") && o.getAsJsonObject("frames").has("fx"))
-		{
-			o.getAsJsonObject("frames").getAsJsonObject("fx").getAsJsonObject("m").entrySet().forEach(e -> parts.add(e.getValue().getAsJsonObject()));
-		}
-		for (JsonObject part : parts)
-		{
-			if (!part.has("t") || client.getTextureProvider() == null)
-			{
-				continue;
-			}
-			for (JsonElement e : part.getAsJsonArray("t"))
-			{
-				int id = e.getAsInt();
-				if (id < 0 || pics.has(String.valueOf(id)) || pics.size() >= 16)
-				{
-					continue;
-				}
-				String png = texturePng(id);
-				if (png != null)
-				{
-					pics.addProperty(String.valueOf(id), png);
-				}
-			}
-		}
-		if (pics.size() > 0)
-		{
-			o.add("tex", pics);
-		}
-		if (client.getTextureProvider() != null)
-		{
-			o.addProperty("b", Math.round(client.getTextureProvider().getBrightness() * 1000) / 1000.0);
-		}
-		return o;
-	}
-
-	// ---- the motion loop (11/15/2026, Jace: "build the pet and the motion loop"): ::outsidemotion gets ready, then
-	// records the next animation they do (an emote, a special attack), from its start to its end, at most MOTION_MOST
-	// frames; nothing begun within MOTION_WAIT, it records their stance standing (its breathing) for MOTION_IDLE. A frame
-	// every MOTION_EVERY client cycles (20 ms each: 12.5 frames a second), the pet's with the player's.
-	private static final int MOTION_EVERY = 4, MOTION_MOST = 50, MOTION_WAIT = 400, MOTION_IDLE = 150;
-	private int motionArmed = -1, motionStart = -1, motionLast;
-	private boolean motionIdle;
-	private JsonObject motionBase, motionPet;
-	private FxTrack motionFx = new FxTrack(), autoFx = new FxTrack();
-	private int motionCount, motionPetCount;
-	private final List<String> motionFrames = new ArrayList<>(), motionPetFrames = new ArrayList<>();
-
-	/** A motion's name from the command's words (lower case), or null: none given, or not a name the relay takes. */
-	static String motionName(String[] args)
-	{
-		if (args == null || args.length == 0)
-		{
-			return null;
-		}
-		String n = String.join(" ", args).trim().toLowerCase();
-		return n.matches("[a-z0-9_ -]{1,24}") ? n : null;
-	}
-
-	/** the name the motion being recorded goes under (null: "idle" if they stood, "motion" if they did something) */
-	private String motionAs;
-
-	private void armMotion(String name)
-	{
-		motionAs = name;
-		motionArmed = client.getGameCycle();
-		if (panel != null)
-		{
-			panel.capturing(true);
-		}
-		motionStart = -1;
-		say("recording the next thing you do (an emote, a special attack): do it now. Nothing in 8 seconds, and it records you standing.");
-	}
-
-	@Subscribe
-	public void onClientTick(net.runelite.api.events.ClientTick e)
-	{
-		if (motionArmed < 0)
-		{
-			Player lp = client.getLocalPlayer();
-			if (lp != null && client.getGameState() == GameState.LOGGED_IN)
-			{
-				liveRecordTick(lp, client.getGameCycle());
-			}
-			return;
-		}
-		Player me = client.getLocalPlayer();
-		if (me == null)
-		{
-			motionArmed = -1;
 			if (panel != null)
 			{
-				panel.capturing(false);
+				panel.proof(null, null);
 			}
 			return;
 		}
-		int now = client.getGameCycle();
-		if (motionStart < 0)
-		{
-			boolean moving = me.getAnimation() != -1;
-			if (!moving && now - motionArmed < MOTION_WAIT)
-			{
-				return;
-			}
-			motionIdle = !moving;
-			motionStart = now;
-			motionLast = now - MOTION_EVERY;
-			motionFrames.clear();
-			motionPetFrames.clear();
-			// (each written out as it's read: one shared model object for anything animated)
-			Model base = me.getModel();
-			if (base == null)
-			{
-				motionArmed = -1;
-				if (panel != null)
-				{
-					panel.capturing(false);
-				}
-				return;
-			}
-			Snap bs = snap(base, true);
-			List<Fx> bfx = effects(me, null);
-			motionCount = ownOf(bs, bfx);
-			motionBase = Kept.trim(bs.json, motionCount);
-			motionFx = new FxTrack();
-			addGround(motionBase, me);
-			Model pet = petModel();
-			motionPetCount = pet == null ? 0 : pet.getVerticesCount();
-			motionPet = pet == null ? null : modelJson(pet);
-		}
-		if (now - motionLast < MOTION_EVERY)
-		{
-			return;
-		}
-		motionLast = now;
-		Model m = me.getModel();
-		Snap ms = m == null ? null : snap(m, false);
-		List<Fx> mfx = ms == null ? null : effects(me, motionFx.models.keySet());
-		if (ms != null && ownOf(ms, mfx) == motionCount)
-		{
-			motionFrames.add(Kept.frame(ms.x, ms.y, ms.z, motionCount));
-			motionFx.add(mfx);
-			Model p = motionPet == null ? null : petModel();
-			motionPetFrames.add(p != null && p.getVerticesCount() == motionPetCount
-				? Kept.frame(p.getVerticesX(), p.getVerticesY(), p.getVerticesZ(), p.getVerticesCount()) : null);
-		}
-		boolean done = motionFrames.size() >= MOTION_MOST
-			|| (motionIdle ? now - motionStart >= MOTION_IDLE : me.getAnimation() == -1 && motionFrames.size() > 2);
-		if (!done)
-		{
-			return;
-		}
-		motionArmed = -1;
-		JsonObject frames = Kept.frames(motionFrames, 1000.0 / (MOTION_EVERY * 20));
-		motionFx.into(frames);
-		JsonObject petFrames = motionPet != null && !motionPetFrames.contains(null) ? Kept.frames(motionPetFrames, 1000.0 / (MOTION_EVERY * 20)) : null;
-		say("recorded " + motionFrames.size() + " frames" + (motionIdle ? " of you standing" : "") + ": sending it to your page");
-		// (11/15/2026, Jace: "build the motion library": kept under its name beside the others)
-		String name = motionAs != null ? motionAs : motionIdle ? "idle" : "motion";
-		say("it goes on your page as \"" + name + "\"");
-		// (the side tab's one button, 11/15/2026: the still model goes too, from the motion's first moment)
-		keep("model", wholeModel(motionBase.deepCopy(), motionPet == null ? null : motionPet.deepCopy(), null, null));
-		keep("motion", name, wholeModel(motionBase, motionPet, frames, petFrames));
-		if (panel != null)
-		{
-			panel.capturing(false);
-		}
-	}
-
-	/** A texture as the client has it, a PNG in base64 (0 a see-through texel), or null. */
-	private String texturePng(int id)
-	{
-		try
-		{
-			int[] px = client.getTextureProvider().load(id);
-			int size = px == null ? 0 : (int) Math.round(Math.sqrt(px.length));
-			if (size == 0 || size * size != px.length)
-			{
-				return null;
-			}
-			java.awt.image.BufferedImage im = new java.awt.image.BufferedImage(size, size, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-			for (int i = 0; i < px.length; i++)
-			{
-				im.setRGB(i % size, i / size, px[i] == 0 ? 0 : 0xff000000 | px[i]);
-			}
-			java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-			javax.imageio.ImageIO.write(im, "png", out);
-			return java.util.Base64.getEncoder().encodeToString(out.toByteArray());
-		}
-		catch (RuntimeException | IOException e)
-		{
-			return null;
-		}
-	}
-
-	/** The whole bank, its tabs and each item's name and price (the client's thread). */
-	private void sendBank()
-	{
-		ItemContainer bank = client.getItemContainer(InventoryID.BANK);
-		if (bank == null || !config.bank())
-		{
-			return;
-		}
-		Item[] items = bank.getItems();
-		int[] ids = new int[items.length];
-		int[] qs = new int[items.length];
-		Map<Integer, Object[]> names = new LinkedHashMap<>();
-		for (int i = 0; i < items.length; i++)
-		{
-			// (a placeholder as its item, none of it)
-			int id = items[i].getId();
-			int real = id > 0 ? itemManager.canonicalize(id) : id;
-			ids[i] = real;
-			qs[i] = real != id ? 0 : items[i].getQuantity();
-			if (real > 0 && !names.containsKey(real))
-			{
-				names.put(real, new Object[]{itemManager.getItemComposition(real).getName(), (long) itemManager.getItemPrice(real)});
-			}
-		}
-		int[] tabVarbits = {VarbitID.BANK_TAB_1, VarbitID.BANK_TAB_2, VarbitID.BANK_TAB_3, VarbitID.BANK_TAB_4,
-			VarbitID.BANK_TAB_5, VarbitID.BANK_TAB_6, VarbitID.BANK_TAB_7, VarbitID.BANK_TAB_8, VarbitID.BANK_TAB_9};
-		int[] tabs = new int[9];
-		for (int i = 0; i < 9; i++)
-		{
-			tabs[i] = client.getVarbitValue(tabVarbits[i]);
-		}
-		keep("bank", Kept.bank(ids, qs, tabs, names));
-	}
-
-	/** Sent to the relay's keep (POST; null: DELETE), off the client's thread; a failure said in the chat. */
-	private void keep(String what, JsonObject body)
-	{
-		keep(what, null, body);
-	}
-
-	private void keep(String what, String name, JsonObject body)
-	{
-		Attach a = attach != null ? attach : Attach.parse(config.stationKey(), gson);
-		if (a == null || !config.send())
-		{
-			return;
-		}
-		String url = a.keepUrl(what) + (name == null ? "" : "&name=" + java.net.URLEncoder.encode(name, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20"));
-		Request.Builder b = new Request.Builder().url(url).header("User-Agent", "outside-plugin/" + VERSION);
-		b = body == null ? b.delete() : b.post(RequestBody.create(JSON, gson.toJson(body)));
-		http.newCall(b.build()).enqueue(new Callback()
+		http.newCall(new Request.Builder().url(a.proofUrl() + "?key=" + java.net.URLEncoder.encode(a.getKey(), java.nio.charset.StandardCharsets.UTF_8))
+			.header("User-Agent", "outside-plugin/" + VERSION).build()).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException ex)
 			{
-				log.debug("outside: keep {} failed", what, ex);
 			}
 
 			@Override
 			public void onResponse(Call call, Response r)
 			{
-				int code = r.code();
-				String why = "";
-				try
+				try (Response res = r)
 				{
-					// (the relay's own words for what it refused: {"error": "..."})
-					String t = r.body() == null ? "" : r.body().string();
-					JsonObject e = t.startsWith("{") ? gson.fromJson(t, JsonObject.class) : null;
-					why = e != null && e.has("error") ? ": " + e.get("error").getAsString() : "";
+					JsonObject o = res.code() == 200 && res.body() != null ? gson.fromJson(res.body().string(), JsonObject.class) : null;
+					String proof = o != null && o.has("proof") ? o.get("proof").getAsString() : null;
+					challenging = "challenging".equals(proof);
+					panel.proof(proof, o != null && o.has("why") ? o.get("why").getAsString() : null);
 				}
-				catch (IOException | RuntimeException ex)
+				catch (IOException | RuntimeException ignored)
 				{
-					why = "";
-				}
-				r.close();
-				if ("motion".equals(what) || "model".equals(what))
-				{
-					readMotions();
-				}
-				if (body != null && code == 200)
-				{
-					if (!"encounter".equals(what))
-					{
-						say("model".equals(what) ? "your model is on your page" : "motion".equals(what) ? "the motion \"" + name + "\" is on your page" : "your bank is on your page");
-					}
-				}
-				else if (body != null && code != 200)
-				{
-					say("your " + what + " didn't go up (the relay said " + code + why + ")");
 				}
 			}
 		});
 	}
 
-	/** Charges and the delve board, as kept on this RuneLite's profile for the account. */
+	/** Charges, as kept on this RuneLite's profile for the account. */
 	private void loadKept()
 	{
 		charges.clear();
@@ -1883,8 +901,6 @@ public class OutsidePlugin extends Plugin
 					charges.put(Integer.parseInt(e.getKey()), e.getValue().getAsInt());
 				}
 			}
-			String d = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "delve");
-			delveSeen = d == null ? null : gson.fromJson(d, JsonArray.class);
 		}
 		catch (RuntimeException e)
 		{
@@ -1900,66 +916,74 @@ public class OutsidePlugin extends Plugin
 			o.addProperty(String.valueOf(e.getKey()), e.getValue());
 		}
 		configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "charges", gson.toJson(o));
-		if (delveSeen != null)
-		{
-			configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "delve", gson.toJson(delveSeen));
-		}
 	}
 
 	@Subscribe
 	public void onStatChanged(StatChanged e)
 	{
-		if (config.activity())
+		// (a level gained: its real level above the one last seen this session; the first seen is only remembered)
+		String skill = e.getSkill().getName();
+		Integer was = levelsSeen.put(skill, e.getLevel());
+		if (was != null && e.getLevel() > was && client.getGameState() == GameState.LOGGED_IN)
 		{
-			activity.xp(System.currentTimeMillis(), e.getSkill().getName(), e.getXp());
+			java.util.Map<String, Integer> one = new java.util.LinkedHashMap<>();
+			one.put(skill, e.getLevel());
+			report(Reports.levels(one, myName()));
 		}
 	}
 
-	/** A hit in their own fight: theirs on an NPC, or one on them (the activity's fighting, and which boss). */
+	/** A monster's loot (RuneLite's own reading of it, as Dink's): worth "Drops worth at least" or more, a report. */
 	@Subscribe
-	public void onHitsplatApplied(HitsplatApplied e)
+	public void onNpcLootReceived(NpcLootReceived e)
 	{
-		if (!config.activity())
+		if (!config.reports() || e.getNpc() == null)
 		{
 			return;
 		}
-		Player me = client.getLocalPlayer();
-		Actor who = e.getActor();
-		if (me == null || who == null)
+		java.util.List<Reports.Item> items = new java.util.ArrayList<>();
+		for (ItemStack s : e.getItems())
 		{
-			return;
+			int id = itemManager.canonicalize(s.getId());
+			items.add(new Reports.Item(id, itemManager.getItemComposition(id).getName(), s.getQuantity(), itemManager.getItemPrice(id)));
 		}
-		if (who == me)
-		{
-			activity.hit(System.currentTimeMillis(), foe(me));
-		}
-		else if (who instanceof NPC && e.getHitsplat().isMine())
-		{
-			activity.hit(System.currentTimeMillis(), who.getName());
-		}
+		report(Reports.loot(e.getNpc().getName(), items, Math.max(0, config.reportLoot()), myName()));
 	}
 
-	/** The NPC in a fight with them: the one they're attacking, or one attacking them (a boss first); null if none. */
-	private String foe(Player me)
+	/** The name they're logged in as, for a report's line. */
+	private String myName()
 	{
-		Actor target = me.getInteracting();
-		if (target instanceof NPC)
+		Player me = client.getLocalPlayer();
+		return me == null || me.getName() == null ? "the subject" : me.getName().replace('\u00a0', ' ');
+	}
+
+	/** A report sent to the relay's Dink route (docs/protocol.md "Dink", from=plugin): with "Levels, kills, drops and log
+	 *  slots" on, a key for the character logged in, and never while held somewhere dangerous (the Wilderness, a PvP
+	 *  area or world), as nothing else is sent there. */
+	private void report(JsonObject payload)
+	{
+		Attach a = attach;
+		String c = character;
+		if (payload == null || !config.reports() || !config.send() || paused || a == null || c == null
+			|| !a.getChannel().toLowerCase(java.util.Locale.ROOT).equals(c))
 		{
-			return target.getName();
+			return;
 		}
-		String any = null;
-		for (NPC n : client.getTopLevelWorldView().npcs())
+		Request req = new Request.Builder().url(a.dinkUrl()).header("User-Agent", "outside-plugin/" + VERSION)
+			.post(RequestBody.create(JSON, gson.toJson(payload))).build();
+		http.newCall(req).enqueue(new Callback()
 		{
-			if (n.getInteracting() == me && n.getName() != null)
+			@Override
+			public void onFailure(Call call, IOException ex)
 			{
-				if (Activity.BOSSES.containsKey(n.getName()))
-				{
-					return n.getName();
-				}
-				any = n.getName();
+				log.debug("outside: a report didn't reach the relay", ex);
 			}
-		}
-		return any;
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				r.close();
+			}
+		});
 	}
 
 	/**
@@ -2041,29 +1065,7 @@ public class OutsidePlugin extends Plugin
 	 *  (11/10/2026, Jace: "there is no danger to someone tracking them there": Activity.PVP_MINIGAME_REGIONS). */
 	static boolean pvpArea(int x, int y, int region, boolean pvpFlag)
 	{
-		return pvpFlag && !inFerox(x, y) && !Activity.PVP_MINIGAME_REGIONS.contains(region);
-	}
-
-	/**
-	 * Safe for the globe's features (following and its world, the activity, the stars): not on a risky world (PvP,
-	 * Deadman, high risk, Bounty Hunter), not in the Wilderness, not in a PvP area (each as above: Ferox Enclave and the
-	 * PvP minigames are safe). Instances are (11/09/2026), unless their template lies in the Wilderness.
-	 */
-	static boolean globeSafe(boolean riskyWorld, boolean wilderness, boolean pvpArea)
-	{
-		return !riskyWorld && !wilderness && !pvpArea;
-	}
-
-	/**
-	 * Safe for the activity's label (11/10/2026, Jace: "Wilderness bosses should be included since we have the option
-	 * for 'In the Wilderness too'"): wherever the globe's features are, and in the Wilderness too (its PvP-area flag
-	 * with it) when they've said so (OutsideConfig.wilderness), since they've already chosen to transmit there. Never
-	 * on a risky world. Following and the stars stay off in the Wilderness whatever the setting (globeSafe): only the
-	 * label goes, two minutes behind as ever.
-	 */
-	static boolean activitySafe(boolean riskyWorld, boolean wilderness, boolean pvpArea, boolean wildernessToo)
-	{
-		return globeSafe(riskyWorld, wilderness, pvpArea) || (wildernessToo && wilderness && !riskyWorld);
+		return pvpFlag && !inFerox(x, y);
 	}
 
 	/**
@@ -2074,24 +1076,6 @@ public class OutsidePlugin extends Plugin
 	static boolean held(boolean pvpWorld, boolean wilderness, boolean pvpArea)
 	{
 		return pvpWorld || wilderness || pvpArea;
-	}
-
-	/** On a world where nothing goes to the globe (RISKY, or any the client counts as PvP). */
-	private boolean riskyWorld()
-	{
-		EnumSet<WorldType> types = client.getWorldType();
-		if (pvpWorld())
-		{
-			return true;
-		}
-		for (WorldType t : types)
-		{
-			if (RISKY.contains(t))
-			{
-				return true;
-			}
-		}
-		return false;
 	}
 
 	/** On a PvP or Deadman world (read here, never sent). */
@@ -2122,16 +1106,25 @@ public class OutsidePlugin extends Plugin
 
 	// ---- the relay ----
 
+	/** RuneLite's Gson, keeping nulls as it writes (Kit.wire): the game socket's messages say "clear this" with them. */
+	private Gson wire;
+
 	private boolean send(JsonObject fields)
 	{
 		WebSocket ws = socket;
-		if (ws == null || !open)
+		Attach a = attach;
+		String c = character;
+		if (ws == null || !open || a == null || c == null || !a.getChannel().toLowerCase(java.util.Locale.ROOT).equals(c))
 		{
 			return false;
 		}
 		JsonObject msg = new JsonObject();
 		msg.add("game", fields);
-		return ws.send(gson.toJson(msg));
+		if (wire == null)
+		{
+			wire = Kit.wire(gson);
+		}
+		return ws.send(wire.toJson(msg));
 	}
 
 	private synchronized void connect()
@@ -2140,7 +1133,7 @@ public class OutsidePlugin extends Plugin
 		{
 			return;
 		}
-		attach = Attach.parse(config.stationKey(), gson);
+		attach = key();
 		if (attach == null)
 		{
 			return;
@@ -2157,7 +1150,8 @@ public class OutsidePlugin extends Plugin
 				if (!toldConnected)
 				{
 					toldConnected = true;
-					say("your outstation (" + attach.getChannel() + ") is receiving what you wear and carry: " + attach.page());
+					say(challenging ? "your claim on outside.wiki/" + attach.getChannel() + " is being proven: gain any experience, then log out"
+						: "your Outside page is live: " + attach.page().replaceFirst("^https://", ""));
 				}
 			}
 
@@ -2190,10 +1184,20 @@ public class OutsidePlugin extends Plugin
 		}
 		socket = null;
 		open = false;
+		if (code == 4012)
+		{
+			// (taking a name back, 11/15/2026: proven, the page is theirs now; its key opens it as the holder's)
+			challenging = false;
+			say("your Outside page is proven yours: outside.wiki/" + attach.getChannel());
+			readProof();
+			retry = executor.schedule(this::connect, 1, TimeUnit.SECONDS);
+			return;
+		}
 		if (code == 4001 || code == 4003)
 		{
 			stopped = true;
-			say("the relay didn't take your station key: paste it again in the plugin's settings");
+			say(challenging ? "someone else proved this name first, so your claim on it has ended"
+				: "the relay didn't take your station key: paste it again in the plugin's settings");
 			return;
 		}
 		if (code == 4000)
