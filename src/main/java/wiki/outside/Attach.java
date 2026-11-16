@@ -134,6 +134,13 @@ public final class Attach
 		return base + "/keep/" + enc(channel) + "/" + enc(what) + "?key=" + enc(key);
 	}
 
+	/** The page's address for the Dink plugin's webhooks (11/16/2026, "Copy my Dink address"): http(s)://…/dink/<channel>?key=…,
+	 *  on the relay every request goes to. Only copied for the player to paste into Dink; never fetched here. */
+	public String dinkAddress()
+	{
+		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/dink/" + enc(channel) + "?");
+	}
+
 	/** Who stands behind the page (11/15/2026): http(s)://…/proof/<channel>, anyone's. */
 	public String proofUrl()
 	{
