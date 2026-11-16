@@ -85,7 +85,7 @@ public class OutsidePlugin extends Plugin
 	private static final Logger log = LoggerFactory.getLogger(OutsidePlugin.class);
 	static final String VERSION = "0.3.0";
 	/** the relay a page is claimed on when there's no key yet (docs/protocol.md "Claiming a name") */
-	static final String HOME_RELAY = "https://relay.ghillie.workers.dev";
+	static final String HOME_RELAY = Attach.HOME;
 	/** quests and diaries read again at least this often, in ticks (5 minutes) */
 	private static final int PROGRESS_EVERY = 500;
 	/** the hourly sync (11/16/2026, the Hub's answer; as RuneProfile's AutoSyncScheduler, AUTO_SYNC_MINUTES = 60): a

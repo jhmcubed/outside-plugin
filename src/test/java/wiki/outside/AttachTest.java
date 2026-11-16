@@ -2,6 +2,9 @@ package wiki.outside;
 
 import org.junit.Test;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 /** The relay's addresses made from a station key (11/15/2026: your year's routes and the plugin's own reports). */
 public class AttachTest
@@ -23,5 +26,36 @@ public class AttachTest
 		assertEquals("https://relay.ghillie.workers.dev/game/jhmcubed", a.gameReadUrl());
 		assertEquals("https://outside.wiki/jhmcubed?code=a-b_c", a.page("a-b_c"));
 		assertEquals("https://outside.wiki/jhmcubed", a.page(""));
+	}
+
+	@Test
+	public void onlyTheOutsideRelay()
+	{
+		assertTrue(Attach.isHome("https://relay.ghillie.workers.dev"));
+		assertTrue(Attach.isHome("wss://relay.ghillie.workers.dev/"));
+		assertTrue(Attach.isHome("relay.ghillie.workers.dev"));
+		assertFalse(Attach.isHome("https://relay.ghillie.workers.dev.evil.example"));
+		assertFalse(Attach.isHome("https://evil.example/relay.ghillie.workers.dev"));
+		assertFalse(Attach.isHome("https://relay.ghillie.workers.dev:8443"));
+		assertFalse(Attach.isHome("https://user@relay.ghillie.workers.dev"));
+		assertFalse(Attach.isHome("http://relay.ghillie.workers.dev"));
+		assertFalse(Attach.isHome("http://127.0.0.1:8787"));
+		assertFalse(Attach.isHome(null));
+	}
+
+	@Test
+	public void theHubsVersionTakesNoOtherRelay()
+	{
+		com.google.gson.Gson gson = new com.google.gson.Gson();
+		assertNull(Attach.parse(key("https://evil.example"), gson));
+		Attach a = Attach.parse(key("wss://relay.ghillie.workers.dev"), gson);
+		assertEquals(Attach.HOME, a.getRelay());
+		assertEquals("https://relay.ghillie.workers.dev/proof/jhmcubed", a.proofUrl());
+	}
+	
+	private static String key(String relay)
+	{
+		String json = "{\"relay\":\"" + relay + "\",\"channel\":\"jhmcubed\",\"key\":\"k3y-k3y-k3y\"}";
+		return "outstation1:" + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(json.getBytes(java.nio.charset.StandardCharsets.UTF_8));
 	}
 }
