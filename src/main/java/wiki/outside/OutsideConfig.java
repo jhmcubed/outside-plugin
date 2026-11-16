@@ -111,4 +111,16 @@ public interface OutsideConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "delve",
+		name = "Doom of Mokhaiotl delves",
+		description = "When you read the board beside the Doom of Mokhaiotl, how many delves you've finished at each level"
+			+ " (as the Delve Calculator plugin reads it), for your Outside page",
+		position = 13
+	)
+	default boolean delve()
+	{
+		return true;
+	}
+
 }
