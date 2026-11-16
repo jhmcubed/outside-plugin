@@ -12,8 +12,8 @@ public interface OutsideConfig extends Config
 	@ConfigItem(
 		keyName = "stationKey",
 		name = "Station key",
-		description = "Your station key (it starts outstation1:): made for you by \"Make my Outside page\" in the Outside side tab,"
-			+ " or from the outstation or a friend's invite. With it, what you wear and carry and your stats show live on your Outside page.",
+		description = "Your page's key (it starts outstation1:): made for you by \"Make my Outside page\" in the Outside"
+			+ " side tab and kept with your account, so this stays blank. Paste one here only if you were given one.",
 		secret = true,
 		position = 0
 	)
@@ -25,11 +25,13 @@ public interface OutsideConfig extends Config
 	@ConfigItem(
 		keyName = "send",
 		name = "Send to my Outside page",
-		description = "What's switched on below goes to the Outside relay (on Cloudflare, unless your key names another),"
-			+ " and your Outside page shows it to anyone. Off: nothing is sent anywhere.",
-		warning = "This sends what you wear and carry, your looting bag, rune pouch, skills and vitals, and your IP"
-			+ " address, to the Outside relay, a server not controlled or verified by the RuneLite developers."
-			+ " Your Outside page shows them to anyone who opens it.",
+		description = "What's switched on below goes to the Outside relay (on Cloudflare) when you press Update my page in the"
+			+ " Outside side tab, and hourly while you're logged in; what you're doing goes as it changes. Your Outside page"
+			+ " shows it to anyone, and while you play you show on outside.wiki's globe, unless your page is friends only"
+			+ " (the side tab). Off: nothing more is sent, and your gear, stats and progress come off your page.",
+		warning = "This submits your gear, stats, quests, diaries, slayer task, what you're doing (as Discord shows it)"
+			+ " and your IP address to the Outside relay, a 3rd-party server not controlled or verified by the RuneLite"
+			+ " developers, when you press Update my page, and hourly. Your Outside page shows them publicly.",
 		position = 1
 	)
 	default boolean send()
@@ -84,12 +86,15 @@ public interface OutsideConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "vitals",
-		name = "Hitpoints, prayer, run and special",
-		description = "And which prayers are on",
-		position = 4
+		keyName = "presence",
+		name = "What I'm doing, as Discord shows it",
+		description = "The skill you're training and the area you're in by name (a city, a dungeon, a boss, a raid, a minigame"
+			+ " or a region), as RuneLite's own Discord plugin shows them: sent as they change (once a minute at most) and with"
+			+ " each update. Your page shows it, and outside.wiki's globe lights you in that area. Never your tile or your"
+			+ " world, and nothing from the Wilderness or a PvP world.",
+		position = 3
 	)
-	default boolean vitals()
+	default boolean presence()
 	{
 		return true;
 	}
@@ -104,30 +109,6 @@ public interface OutsideConfig extends Config
 	default boolean charges()
 	{
 		return true;
-	}
-
-	@ConfigItem(
-		keyName = "reports",
-		name = "Levels, kills, drops and log slots",
-		description = "Your levels as you gain them, kill counts, collection log slots, pets, clue counts, quests, diary tiers,"
-			+ " combat tasks, slayer tasks and drops worth at least the amount below, as the game tells you them, for your page's event log and outside.wiki's feed (as"
-			+ " Dink would send them; while your outstation transmits, Dink's go through it instead)",
-		position = 12
-	)
-	default boolean reports()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "reportLoot",
-		name = "Drops worth at least",
-		description = "The least a drop is worth (in coins, at Grand Exchange prices) for it to go on your page",
-		position = 12
-	)
-	default int reportLoot()
-	{
-		return 100_000;
 	}
 
 }

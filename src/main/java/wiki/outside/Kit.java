@@ -22,7 +22,7 @@ public class Kit
 	private final Set<Integer> named = new TreeSet<>();
 
 	/**
-	 * The writer for the game socket (11/16/2026, Jace: his goblin task never reached his page): RuneLite's Gson, which
+	 * The writer for the relay (the game socket's, the snapshot's; 11/16/2026, Jace: his goblin task never reached his page): RuneLite's Gson, which
 	 * plugins are given, leaves out an object's null members as it writes, so a field's null that clears it (a part
 	 * switched off, the slayer task's "area": null) had been going as nothing, or as a field the relay refuses. The same
 	 * Gson, with nulls kept; RuneLite's own otherwise untouched.
@@ -69,6 +69,16 @@ public class Kit
 	/** Ids not named yet, from the item fields (worn, inv, bag, pouch, seeds, barrel, quiver), marked as named. */
 	public Set<Integer> unnamed(Map<String, JsonElement> now)
 	{
+		Set<Integer> ids = ids(now);
+		ids.removeAll(named);
+		named.addAll(ids);
+		return ids;
+	}
+
+	/** Every item id in the item fields (worn, inv, bag, pouch, seeds, barrel, quiver): a snapshot names them all
+	 *  (11/16/2026). */
+	public static Set<Integer> ids(Map<String, JsonElement> now)
+	{
 		Set<Integer> ids = new TreeSet<>();
 		for (String f : new String[]{"worn", "inv", "bag", "pouch", "seeds", "barrel"})
 		{
@@ -89,8 +99,6 @@ public class Kit
 		{
 			ids.add(q.getAsJsonArray().get(0).getAsInt());
 		}
-		ids.removeAll(named);
-		named.addAll(ids);
 		return ids;
 	}
 
@@ -133,6 +141,24 @@ public class Kit
 	 * Held back somewhere dangerous: "paused", and what was worn and carried emptied with it, so the relay keeps
 	 * nothing of what they took in (it keeps the last of each field otherwise), nor the vitals and prayers.
 	 */
+	/** Everything taken off the page (11/16/2026, the permissions review): sent as "Send to my Outside page" goes off, so
+	 *  the page doesn't go on showing what was last sent. */
+	public static JsonObject cleared()
+	{
+		JsonObject o = held("x");
+		o.remove("paused");
+		o.addProperty("off", true);
+		o.add("skills", new JsonObject());
+		o.add("charges", new JsonObject());
+		o.add("quests", JsonNull.INSTANCE);
+		o.add("diaries", JsonNull.INSTANCE);
+		o.add("combat", JsonNull.INSTANCE);
+		o.add("slayer", JsonNull.INSTANCE);
+		o.add("delve", JsonNull.INSTANCE);
+		o.add("presence", JsonNull.INSTANCE);   // (what they're doing as Discord shows it, 11/16/2026)
+		return o;
+	}
+
 	public static JsonObject held(String why)
 	{
 		JsonObject o = new JsonObject();

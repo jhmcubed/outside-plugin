@@ -75,23 +75,10 @@ public final class Attach
 		}
 	}
 
-	/** The relay's game socket: ws(s)://…/game/<channel>?key=…&v=… (an https:// relay as wss://). */
-	public String gameUrl(String version)
+	/** The snapshot's address (11/16/2026; docs/protocol.md, "The snapshot"): POST http(s)://…/game/<channel>?key=…&v=…. */
+	public String postUrl(String version)
 	{
-		String base = relay.trim().replaceAll("/+$", "");
-		if (base.startsWith("https://"))
-		{
-			base = "wss://" + base.substring(8);
-		}
-		else if (base.startsWith("http://"))
-		{
-			base = "ws://" + base.substring(7);
-		}
-		else if (!base.contains("://"))
-		{
-			base = "wss://" + base;
-		}
-		return base + "/game/" + enc(channel) + "?key=" + enc(key) + "&v=" + enc(version);
+		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/game/" + enc(channel) + "?") + "&v=" + enc(version);
 	}
 
 	/** The relay's keep for the page (11/14/2026): http(s)://…/keep/<channel>/<what>?key=… (a bare relay as https://). */
@@ -113,16 +100,34 @@ public final class Attach
 		return base + "/keep/" + enc(channel) + "/" + enc(what) + "?key=" + enc(key);
 	}
 
-	/** The relay's Dink route, for the plugin's own reports (11/15/2026): http(s)://…/dink/<channel>?key=…&from=plugin. */
-	public String dinkUrl()
-	{
-		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/dink/" + enc(channel) + "?") + "&from=plugin";
-	}
-
 	/** Who stands behind the page (11/15/2026): http(s)://…/proof/<channel>, anyone's. */
 	public String proofUrl()
 	{
 		return keepUrl("x").replaceFirst("/keep/.*$", "/proof/" + enc(channel));
+	}
+
+	/** Friends only, set from the plugin (11/16/2026, the permissions review): http(s)://…/code/<channel>?key=…. */
+	public String codeUrl()
+	{
+		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/code/" + enc(channel) + "?");
+	}
+
+	/** The page taken down by its own key (11/16/2026): http(s)://…/channels/<channel>?key=…. */
+	public String takeDownUrl()
+	{
+		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/channels/" + enc(channel) + "?");
+	}
+
+	/** The page's kept game, as anyone reads it (403 when it's friends only and no code is given). */
+	public String gameReadUrl()
+	{
+		return keepUrl("x").replaceFirst("/keep/.*$", "/game/" + enc(channel));
+	}
+
+	/** The page with a watch code, for friends (11/16/2026). */
+	public String page(String code)
+	{
+		return code == null || code.isEmpty() ? page() : page() + "?code=" + enc(code);
 	}
 
 	/** The outstation's page on Outside. */

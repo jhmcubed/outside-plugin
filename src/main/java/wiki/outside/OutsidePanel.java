@@ -20,7 +20,7 @@ import net.runelite.client.ui.PluginPanel;
  * The plugin's side tab (11/15/2026). It shows:
  * <ul>
  * <li>whose page it is and a way to open it; making a page for the character logged in, and proving it theirs;</li>
- * <li>the station key, copied for the outstation program;</li>
+ * <li>"Update my page" and when it was last updated (11/16/2026, the snapshot);</li>
  * </ul>
  * Everything it does goes through the plugin (OutsidePlugin's panel hooks); this only draws.
  */
@@ -36,7 +36,13 @@ public class OutsidePanel extends PluginPanel
 
 		void claim();
 
-		void copyKey();
+		void update();
+
+		void friendsOnly(boolean on);
+
+		void copyFriendsLink();
+
+		void takeDown();
 
 	}
 
@@ -50,7 +56,17 @@ public class OutsidePanel extends PluginPanel
 	private final JLabel claimStatus = new JLabel(" ");
 	private final JLabel proofLine = small(" ");
 	private final JLabel otherLine = small(" ");
-	private final JLabel keyStatus = small(" ");
+	// (11/16/2026, the snapshot: "Update my page", when it was last updated from here, and what the last press did)
+	private final JLabel snapLine = small(" ");
+	private final JLabel snapStatus = small(" ");
+	private long snapAt;
+	private final javax.swing.Timer snapClock = new javax.swing.Timer(30_000, e -> snapLine.setText(snapWords(snapAt)));
+	// (11/16/2026, the permissions review: who sees the page, and taking it down, with the plugin alone)
+	private final JLabel access = small(" ");
+	private final JButton accessButton = new JButton("Make it friends only");
+	private final JPanel friendsLink = new JPanel();
+	private final JLabel accessStatus = small(" ");
+	private boolean friends;
 
 	public OutsidePanel(Hooks hooks)
 	{
@@ -74,7 +90,8 @@ public class OutsidePanel extends PluginPanel
 		// here, under the name they're logged in as; docs/protocol.md "Claiming a name")
 		start.setLayout(new BoxLayout(start, BoxLayout.Y_AXIS));
 		start.add(left(small("<html><div style='width:155px'>No page yet. Log in, then make one: it's named after the character you're logged in as,"
-			+ " and shows what you wear and carry and your stats, live. Each character has a page and a key of its own.</div></html>")));
+			+ " and shows what you wear and carry, your stats, quests, diaries and slayer task, updated when you ask and"
+			+ " hourly while you play. Each character has a page and a key of its own.</div></html>")));
 		otherLine.setVisible(false);
 		start.add(left(otherLine));
 		start.add(Box.createVerticalStrut(4));
@@ -82,29 +99,53 @@ public class OutsidePanel extends PluginPanel
 		start.add(wide(claim));
 		claimStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		start.add(left(claimStatus));
-		start.add(left(small("<html><div style='width:155px'>Have an outstation or a friend's invite? Paste its station key in the plugin's settings instead.</div></html>")));
 		start.add(Box.createVerticalStrut(10));
 		start.setVisible(false);
 		col.add(start);
 		// (what needs a page: only when this character has one; 11/15/2026, Jace: on his alt, sburb's motions still showed)
 		page.setLayout(new BoxLayout(page, BoxLayout.Y_AXIS));
 		page.add(wide(button("Open my page", hooks::openPage)));
+		page.add(Box.createVerticalStrut(6));
+		page.add(wide(button("Update my page", hooks::update)));
+		snapLine.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		page.add(left(snapLine));
+		snapStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		page.add(left(snapStatus));
+		page.add(left(small("<html><div style='width:155px'>Your gear, stats, quests, diaries and slayer task go when you press"
+			+ " it, and by themselves every hour you're logged in; never from the Wilderness or a PvP world.</div></html>")));
+		snapClock.start();
 		page.add(Box.createVerticalStrut(14));
 
 		page.add(wide(button("Refresh", hooks::refresh)));
 		status.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		page.add(left(status));
 		page.add(Box.createVerticalStrut(14));
-		// (11/15/2026, "Open your own" led by the plugin: an outstation transmits to the same page with the same key, and a
-		// key made here is kept with the account, not in the settings, so this is how it's handed over)
-		page.add(left(heading("A transmission")));
-		page.add(left(small("<html><div style='width:155px'>The outstation program adds your game itself to your page: a few frames"
-			+ " a second, its sound if you want, a chat. It takes this page's key: copy it, and paste it into its first screen."
-			+ " Keep it to yourself: whoever has it can send to your page.</div></html>")));
-		page.add(Box.createVerticalStrut(6));
-		page.add(wide(button("Copy my station key", hooks::copyKey)));
-		keyStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		page.add(left(keyStatus));
+
+		page.add(left(heading("Who sees it")));
+		page.add(left(access));
+		page.add(Box.createVerticalStrut(4));
+		accessButton.addActionListener(e -> hooks.friendsOnly(!friends));
+		page.add(wide(accessButton));
+		friendsLink.setLayout(new BoxLayout(friendsLink, BoxLayout.Y_AXIS));
+		friendsLink.add(Box.createVerticalStrut(4));
+		friendsLink.add(wide(button("Copy the friends' link", hooks::copyFriendsLink)));
+		friendsLink.setVisible(false);
+		page.add(friendsLink);
+		accessStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		page.add(left(accessStatus));
+		page.add(Box.createVerticalStrut(14));
+		page.add(wide(button("Take my page down", () ->
+		{
+			int sure = javax.swing.JOptionPane.showConfirmDialog(this,
+				"Take your Outside page down? Everything on it goes, and the name is free for anyone to claim."
+					, "Take my page down", javax.swing.JOptionPane.OK_CANCEL_OPTION,
+				javax.swing.JOptionPane.WARNING_MESSAGE);
+			if (sure == javax.swing.JOptionPane.OK_OPTION)
+			{
+				hooks.takeDown();
+			}
+		})));
+		access(null);
 
 		page.setVisible(false);
 		col.add(page);
@@ -131,10 +172,25 @@ public class OutsidePanel extends PluginPanel
 		});
 	}
 
-	/** A line under "Copy my station key". */
-	public void keyStatus(String words)
+	/** Who sees the page: true friends only, false anyone, null not read yet. */
+	public void access(Boolean friendsOnly)
 	{
-		SwingUtilities.invokeLater(() -> keyStatus.setText(words == null ? " " : "<html><div style='width:155px'>" + esc(words) + "</div></html>"));
+		SwingUtilities.invokeLater(() ->
+		{
+			friends = Boolean.TRUE.equals(friendsOnly);
+			access.setText("<html><div style='width:155px'>" + (friendsOnly == null ? "Anyone with the link, unless you've made it friends only."
+				: friends ? "Friends only: only those you give the friends' link to. It's off the globe and the feed."
+				: "Anyone with the link, and you show on outside.wiki's globe and feed while you play.") + "</div></html>");
+			accessButton.setText(friends ? "Open it to anyone" : "Make it friends only");
+			friendsLink.setVisible(friends);
+			revalidate();
+		});
+	}
+
+	/** A line under "Who sees it". */
+	public void accessStatus(String words)
+	{
+		SwingUtilities.invokeLater(() -> accessStatus.setText(words == null ? " " : "<html><div style='width:155px'>" + esc(words) + "</div></html>"));
 	}
 
 	/** When the key in the settings is another character's (its page), and who's logged in: said under the button. */
@@ -156,13 +212,52 @@ public class OutsidePanel extends PluginPanel
 		{
 			boolean un = "unproven".equals(proof) || "challenging".equals(proof);
 			proofLine.setText("challenging".equals(proof)
-				? "<html><div style='width:155px'>Someone claimed this name first and hasn't proven it. Gain any experience, wait a minute,"
-				+ " then log out: when the official hiscores show it, the page is yours, and their key stops working." + whyLine(why) + "</div></html>"
-				: un ? "<html><div style='width:155px'>Your page is marked unproven. Gain any experience, wait a minute, then log out:"
+				? "<html><div style='width:155px'>Someone claimed this name first and hasn't proven it. Gain any experience, press Update"
+				+ " my page, wait a minute, then log out: when the official hiscores show it, the page is yours, and their key stops working." + whyLine(why) + "</div></html>"
+				: un ? "<html><div style='width:155px'>Your page is marked unproven. Gain any experience, press Update my page, wait a"
+				+ " minute, then log out:"
 				+ " within a few minutes the official hiscores show it, and your page is proven yours." + whyLine(why) + "</div></html>" : " ");
 			proofLine.setVisible(un);
 			revalidate();
 		});
+	}
+
+	/** The plugin's off: the clock stops. */
+	public void stop()
+	{
+		snapClock.stop();
+	}
+
+	/** When the page was last updated from here (ms; 0: not this session). */
+	public void snapped(long at)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			snapAt = at;
+			snapLine.setText(snapWords(at));
+			if (at > 0)
+			{
+				snapStatus.setText(" ");
+			}
+		});
+	}
+
+	/** A line under "Update my page" (what the last press did). */
+	public void snapStatus(String words)
+	{
+		SwingUtilities.invokeLater(() -> snapStatus.setText(words == null ? " " : "<html><div style='width:155px'>" + esc(words) + "</div></html>"));
+	}
+
+	/** "updated 14 minutes ago", or nothing before the first this session. */
+	static String snapWords(long at)
+	{
+		if (at <= 0)
+		{
+			return " ";
+		}
+		long m = Math.max(0, (System.currentTimeMillis() - at) / 60_000);
+		return m < 1 ? "updated just now" : m == 1 ? "updated a minute ago" : m < 60 ? "updated " + m + " minutes ago"
+			: m < 120 ? "updated an hour ago" : "updated " + (m / 60) + " hours ago";
 	}
 
 	/** While a claim's asked, the button waits; then a line under it (null: none). */
