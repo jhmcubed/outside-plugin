@@ -27,10 +27,8 @@ REPO2 = os.path.join(os.path.expanduser("~"), ".runelite", "repository2")
 MAVEN = "https://repo.runelite.net/net/runelite/runelite-api/{v}/runelite-api-{v}.jar"
 SEP = os.pathsep
 
-
 def vkey(v):
     return [int(x) if x.isdigit() else 0 for x in re.split(r"[.\-]", v)]
-
 
 def installed():
     """The installed RuneLite's jars, the newest version of each, and that version."""
@@ -49,7 +47,6 @@ def installed():
         sys.exit("no client jar in %s" % REPO2)
     return [j for _, j in newest.values()], client[0]
 
-
 def api_jar(version):
     os.makedirs(LIB, exist_ok=True)
     path = os.path.join(LIB, "runelite-api-%s.jar" % version)
@@ -60,7 +57,6 @@ def api_jar(version):
             shutil.copyfileobj(r, f)
         os.replace(path + ".part", path)
     return path
-
 
 def compile_all():
     jars, version = installed()
@@ -91,7 +87,6 @@ def compile_all():
     print("compiled %d sources against RuneLite %s" % (len(sources), version))
     return cp
 
-
 def main(argv):
     what = argv[0] if argv else "compile"
     cp = compile_all()
@@ -101,7 +96,6 @@ def main(argv):
         return subprocess.run(["java", "-ea", "-cp", SEP.join([BUILD] + cp), "wiki.outside.OutsidePluginTest",
                                "--developer-mode", "--debug", *argv[1:]]).returncode
     sys.exit(__doc__)
-
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
