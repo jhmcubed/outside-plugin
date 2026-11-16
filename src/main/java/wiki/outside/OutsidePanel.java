@@ -91,9 +91,9 @@ public class OutsidePanel extends PluginPanel
 		page.add(wide(button("Open my page", hooks::openPage)));
 		page.add(Box.createVerticalStrut(14));
 
+		page.add(wide(button("Refresh", hooks::refresh)));
 		status.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		page.add(left(status));
-		page.add(wide(button("Refresh", hooks::refresh)));
 		page.add(Box.createVerticalStrut(14));
 		// (11/15/2026, "Open your own" led by the plugin: an outstation transmits to the same page with the same key, and a
 		// key made here is kept with the account, not in the settings, so this is how it's handed over)
