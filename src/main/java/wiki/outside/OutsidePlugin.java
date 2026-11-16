@@ -99,7 +99,7 @@ public class OutsidePlugin extends Plugin
 	static final long UPDATE_EVERY_MS = 60_000L;
 	/** what a snapshot carries (the rest of read()'s fields are the socket's) */
 	static final String[] SNAP_FIELDS = {"name", "type", "worn", "inv", "bag", "pouch", "seeds", "barrel", "quiver",
-		"charges", "skills", "quests", "diaries", "combat", "slayer", "delve", "clog"};   // (delve: update 2; clog: the collection log's counter, 11/16/2026)
+		"charges", "skills", "quests", "diaries", "combat", "slayer", "delve", "clog", "counts"};   // (delve: update 2; clog: the collection log's counter; counts: kill and clue counts, 11/16/2026)
 
 	@Inject
 	private Client client;
@@ -454,6 +454,8 @@ public class OutsidePlugin extends Plugin
 	static final int CLOG_NEW_MOST = 8;
 	/** the slots the chat named since the last update went */
 	private final List<String> clogNew = new ArrayList<>();
+	/** kill counts and clue counts as the chat says them, kept per account (Counts; 11/16/2026) */
+	private final Counts counts = new Counts();
 
 	/** The item a chat line says was added to the collection log, or null. */
 	static String clogAdded(String line)
@@ -755,6 +757,12 @@ public class OutsidePlugin extends Plugin
 			{
 				m.put("clog", clog);
 			}
+			// (kill counts and clue counts, as the chat last said each; kept on this RuneLite's profile)
+			JsonObject c = counts.json();
+			if (c != null)
+			{
+				m.put("counts", c);
+			}
 		}
 		else
 		{
@@ -763,6 +771,7 @@ public class OutsidePlugin extends Plugin
 			m.put("diaries", JsonNull.INSTANCE);
 			m.put("combat", JsonNull.INSTANCE);
 			m.put("clog", JsonNull.INSTANCE);
+			m.put("counts", JsonNull.INSTANCE);
 		}
 		if (config.slayer())
 		{
@@ -875,6 +884,10 @@ public class OutsidePlugin extends Plugin
 				{
 					clogNew.add(added);
 				}
+			}
+			if (counts.take(Text.removeTags(e.getMessage())))
+			{
+				configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "counts", gson.toJson(counts.json()));
 			}
 		}
 		if (!config.charges() || (e.getType() != ChatMessageType.GAMEMESSAGE && e.getType() != ChatMessageType.SPAM))
@@ -1487,6 +1500,7 @@ public class OutsidePlugin extends Plugin
 	private void loadKept()
 	{
 		charges.clear();
+		counts.load(null);
 		try
 		{
 			String c = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "charges");
@@ -1498,6 +1512,8 @@ public class OutsidePlugin extends Plugin
 					charges.put(Integer.parseInt(e.getKey()), e.getValue().getAsInt());
 				}
 			}
+			String n = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "counts");
+			counts.load(n == null ? null : gson.fromJson(n, JsonObject.class));
 			String d = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "delve");
 			delveSeen = d == null ? null : gson.fromJson(d, JsonArray.class);
 		}
