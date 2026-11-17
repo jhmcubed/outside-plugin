@@ -1201,6 +1201,18 @@ public class OutsidePlugin extends Plugin
 			}
 
 			@Override
+			public boolean ground()
+			{
+				return config.ground();
+			}
+
+			@Override
+			public void setGround(boolean on)
+			{
+				configManager.setConfiguration(OutsideConfig.GROUP, "ground", on);
+			}
+
+			@Override
 			public void claim()
 			{
 				clientThread.invokeLater(() ->
