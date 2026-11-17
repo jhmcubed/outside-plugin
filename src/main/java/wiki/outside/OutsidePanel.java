@@ -203,10 +203,6 @@ public class OutsidePanel extends PluginPanel
 		page.add(Box.createVerticalStrut(14));
 		page.add(wide(button("Take my model off my page", hooks::removeModel)));
 		page.add(Box.createVerticalStrut(14));
-		page.add(wide(button("Refresh", hooks::refresh)));
-		status.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		page.add(left(status));
-		page.add(Box.createVerticalStrut(14));
 
 		page.add(left(heading("Who sees it")));
 		page.add(left(access));

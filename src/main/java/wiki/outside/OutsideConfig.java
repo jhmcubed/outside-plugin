@@ -127,7 +127,7 @@ public interface OutsideConfig extends Config
 	@ConfigItem(
 		keyName = "bank",
 		name = "My bank on my page",
-		description = "Off (to begin with). On, your whole bank (every item, how many, and its tabs) goes to your Outside"
+		description = "On (to begin with): your whole bank (every item, how many, and its tabs) goes to your Outside"
 			+ " page with your next update after you use it (Update my page, or the hourly one), where anyone can see it",
 		warning = "On, your whole bank (every item and how many) goes to the Outside relay, a server not controlled"
 			+ " or verified by the RuneLite developers, with your next update after you use your bank, and your Outside page shows it to"
@@ -136,13 +136,13 @@ public interface OutsideConfig extends Config
 	)
 	default boolean bank()
 	{
-		return false;
+		return true;
 	}
 
 	@ConfigItem(
 		keyName = "deathbank",
 		name = "My deathbank on my page",
-		description = "Off (to begin with). On, when a death makes a deathbank (the Item Retrieval Service's, as at"
+		description = "On (to begin with): when a death makes a deathbank (the Item Retrieval Service's, as at"
 			+ " Hespori, Zulrah or Vorkath), what it took and which one it is go to your Outside page, where anyone"
 			+ " can see them, with your next update (and again as its window shows it after you look in it). Emptied, it comes off your page",
 		warning = "On, each time a death makes a deathbank or you look in one, what's in it (every item and how many) and which boss or place"
@@ -152,13 +152,13 @@ public interface OutsideConfig extends Config
 	)
 	default boolean deathbank()
 	{
-		return false;
+		return true;
 	}
 
 	@ConfigItem(
 		keyName = "model",
 		name = "My character's model on my page",
-		description = "Off (to begin with). On, your character's 3D model as you look now goes to your Outside page"
+		description = "On (to begin with): your character's 3D model as you look now goes to your Outside page"
 			+ " (as RuneProfile's does); type ::outsidemodel to send it again after a change. Off takes it down",
 		warning = "On, your character's model as you look now (its shape and colours, nothing else) goes to the"
 			+ " Outside relay, a server not controlled or verified by the RuneLite developers, and your Outside page"
@@ -167,13 +167,13 @@ public interface OutsideConfig extends Config
 	)
 	default boolean model()
 	{
-		return false;
+		return true;
 	}
 
 	@ConfigItem(
 		keyName = "ground",
 		name = "The ground under my model",
-		description = "Off (to begin with). On, when you capture your character (::outsidemodel, ::outsidemotion or the side"
+		description = "On (to begin with): when you capture your character (::outsidemodel, ::outsidemotion or the side"
 			+ " tab), the ground round you then (about five tiles each way: its paint and its shape, no objects or"
 			+ " people) goes with it, and your page draws you standing on it. Never with the live view's own captures.",
 		warning = "On, each time you capture your character, the ground round you then (about five tiles each way) goes"
@@ -183,6 +183,6 @@ public interface OutsideConfig extends Config
 	)
 	default boolean ground()
 	{
-		return false;
+		return true;
 	}
 }
