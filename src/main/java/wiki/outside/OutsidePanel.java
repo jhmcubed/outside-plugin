@@ -5,12 +5,16 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.GridLayout;
+import java.util.List;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
+import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
+import javax.swing.JRadioButton;
+import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
@@ -21,6 +25,8 @@ import net.runelite.client.ui.PluginPanel;
  * <ul>
  * <li>whose page it is and a way to open it; making a page for the character logged in, and proving it theirs;</li>
  * <li>"Update my page" and when it was last updated (11/16/2026, the snapshot);</li>
+ * <li>capturing the character (the next emote done within 8 seconds, else them and their pet standing), the motions
+ * on their page, which one it shows first, taking one away, and taking their model off their page;</li>
  * </ul>
  * Everything it does goes through the plugin (OutsidePlugin's panel hooks); this only draws.
  */
@@ -29,8 +35,15 @@ public class OutsidePanel extends PluginPanel
 	/** what the panel asks the plugin to do */
 	public interface Hooks
 	{
+		void capture(String name);
 
 		void refresh();
+
+		void first(String name);
+
+		void forget(String name);
+
+		void removeModel();
 
 		void openPage();
 
@@ -54,10 +67,26 @@ public class OutsidePanel extends PluginPanel
 
 	}
 
+	/** a motion on their page, as the relay lists it */
+	public static final class Motion
+	{
+		final String name;
+		final int frames;
+
+		public Motion(String name, int frames)
+		{
+			this.name = name;
+			this.frames = frames;
+		}
+	}
+
 	private static final Color LIME = new Color(0xb9, 0xff, 0x00);
 	private final Hooks hooks;
 	private final JLabel who = new JLabel(" ");
 	private final JLabel status = new JLabel(" ");
+	private final JTextField name = new JTextField();
+	private final JButton capture = new JButton("Capture my character");
+	private final JPanel motions = new JPanel();
 	private final JPanel start = new JPanel();
 	private final JPanel page = new JPanel();
 	private final JButton claim = new JButton("Make my Outside page");
@@ -143,6 +172,37 @@ public class OutsidePanel extends PluginPanel
 		snapClock.start();
 		page.add(Box.createVerticalStrut(14));
 
+		page.add(left(heading("Your character")));
+		page.add(left(small("<html><div style='width:155px'>Press capture, then do an emote within 8 seconds: it's recorded from its start to its end, your pet's"
+			+ " with it. Do nothing, and it records you and your pet standing. Your page shows it, and keeps it under its name.</div></html>")));
+		page.add(Box.createVerticalStrut(6));
+		JPanel named = new JPanel(new BorderLayout(6, 0));
+		JLabel nl = small("Name");
+		named.add(nl, BorderLayout.WEST);
+		name.setToolTipText("a name for it on your page (blank: \"idle\" if you stand, \"motion\" if you do something)");
+		named.add(name, BorderLayout.CENTER);
+		named.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+		page.add(named);
+		page.add(Box.createVerticalStrut(6));
+		capture.addActionListener(e -> hooks.capture(name.getText().trim()));
+		page.add(wide(capture));
+		status.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		page.add(left(status));
+		page.add(Box.createVerticalStrut(14));
+
+		JPanel head = new JPanel(new BorderLayout());
+		head.add(heading("On your page"), BorderLayout.WEST);
+		JButton again = new JButton("Refresh");
+		again.addActionListener(e -> hooks.refresh());
+		head.add(again, BorderLayout.EAST);
+		head.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+		page.add(head);
+		page.add(left(small("<html><div style='width:155px'>The one picked shows first to everyone who opens your page.</div></html>")));
+		motions.setLayout(new GridLayout(0, 1, 0, 4));
+		page.add(motions);
+		page.add(Box.createVerticalStrut(14));
+		page.add(wide(button("Take my model off my page", hooks::removeModel)));
+		page.add(Box.createVerticalStrut(14));
 		page.add(wide(button("Refresh", hooks::refresh)));
 		status.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		page.add(left(status));
@@ -188,6 +248,7 @@ public class OutsidePanel extends PluginPanel
 		col.add(page);
 
 		add(col, BorderLayout.NORTH);
+		showMotions(null, "");
 	}
 
 	/** Whose page it is (their channel), or that there's no key yet. */
@@ -204,6 +265,8 @@ public class OutsidePanel extends PluginPanel
 				// (another page, or none: what the last one said goes)
 				status.setText(" ");
 				claimStatus.setText(" ");
+				motions.removeAll();
+				motions.add(small("(not read yet)"));
 			}
 			revalidate();
 		});
@@ -376,6 +439,63 @@ public class OutsidePanel extends PluginPanel
 	public void status(String words)
 	{
 		SwingUtilities.invokeLater(() -> status.setText("<html><div style='width:155px'>" + esc(words) + "</div></html>"));
+	}
+
+	/** While a capture runs, the button waits. */
+	public void capturing(boolean on)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			capture.setEnabled(!on);
+			capture.setText(on ? "Recording…" : "Capture my character");
+		});
+	}
+
+	/** The motions on their page (null: not read), the one shown first ("" the still model). */
+	public void showMotions(List<Motion> list, String first)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			motions.removeAll();
+			if (list == null)
+			{
+				motions.add(small("(not read yet)"));
+			}
+			else
+			{
+				ButtonGroup group = new ButtonGroup();
+				motions.add(row("still", -1, first.isEmpty(), group));
+				for (Motion m : list)
+				{
+					motions.add(row(m.name, m.frames, m.name.equals(first), group));
+				}
+			}
+			motions.revalidate();
+			motions.repaint();
+		});
+	}
+
+	private JPanel row(String n, int frames, boolean isFirst, ButtonGroup group)
+	{
+		JPanel r = new JPanel(new BorderLayout(4, 0));
+		r.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		r.setBorder(BorderFactory.createEmptyBorder(4, 6, 4, 6));
+		JRadioButton pick = new JRadioButton(n + (frames > 0 ? "  (" + frames + " frames)" : ""), isFirst);
+		pick.setToolTipText("show this first on your page");
+		pick.setOpaque(false);
+		group.add(pick);
+		String key = "still".equals(n) && frames < 0 ? "" : n;
+		pick.addActionListener(e -> hooks.first(key));
+		r.add(pick, BorderLayout.CENTER);
+		if (frames >= 0)
+		{
+			JButton x = new JButton("✕");
+			x.setToolTipText("take \"" + n + "\" off your page");
+			x.setMargin(new java.awt.Insets(0, 4, 0, 4));
+			x.addActionListener(e -> hooks.forget(n));
+			r.add(x, BorderLayout.EAST);
+		}
+		return r;
 	}
 
 	/** What the proof last did (the relay's words), under the line. */

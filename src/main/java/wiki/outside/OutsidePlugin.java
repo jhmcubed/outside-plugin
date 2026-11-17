@@ -18,7 +18,13 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
+import net.runelite.api.Actor;
+import net.runelite.api.ActorSpotAnim;
 import net.runelite.api.Perspective;
+import net.runelite.api.Scene;
+import net.runelite.api.SceneTileModel;
+import net.runelite.api.SceneTilePaint;
+import net.runelite.api.Tile;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.EnumComposition;
@@ -27,6 +33,7 @@ import net.runelite.api.GameState;
 import net.runelite.api.IndexedObjectSet;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
+import net.runelite.api.NPC;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
 import net.runelite.api.WorldEntity;
@@ -38,9 +45,12 @@ import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ItemContainerChanged;
 import net.runelite.api.events.StatChanged;
+import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.ChatMessage;
+import net.runelite.api.events.CommandExecuted;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.events.WidgetLoaded;
+import net.runelite.api.Model;
 import net.runelite.api.widgets.Widget;
 import net.runelite.client.util.Text;
 import okhttp3.Call;
@@ -49,6 +59,7 @@ import okhttp3.MediaType;
 import okhttp3.RequestBody;
 import java.io.IOException;
 import java.util.HashSet;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
@@ -76,6 +87,9 @@ import org.slf4j.LoggerFactory;
  * never from the Wilderness, a PvP area or world; and what they're doing as RuneLite's own Discord plugin shows it
  * (Presence: the skill being trained, the area by Discord's name), as it changes, at most once a minute. Never another
  * player's anything, nor anything they type.
+ * Their character's model, its motions and the live view (Kept), off to begin with.
+ * Their bank, off to begin with.
+ * Their deathbank, as they last looked in it, off to begin with.
  */
 @PluginDescriptor(
 	name = "Outside",
@@ -137,6 +151,10 @@ public class OutsidePlugin extends Plugin
 	private volatile boolean updateWaiting;
 	private volatile boolean posted;
 	private boolean sceneDue;
+	/** worlds where nothing goes to the globe: PvP, Deadman, high risk, Bounty Hunter (11/10/2026: not the PvP Arena's
+	 *  or Last Man Standing's, there only for those minigames, which are ordinary minigames now) */
+	private static final EnumSet<WorldType> RISKY = EnumSet.of(WorldType.PVP, WorldType.DEADMAN, WorldType.HIGH_RISK,
+		WorldType.BOUNTY);
 	// (quests and diaries, read again when what they depend on changes, or every 5 minutes; the slayer task's names
 	// looked up again when its varps change; 11/15/2026)
 	private JsonObject questsSeen, diariesSeen, slayerSeen;
@@ -163,6 +181,18 @@ public class OutsidePlugin extends Plugin
 	private int checkedItem = -1, checkedTick = -100, ticks;
 	/** (11/14/2026) the Doom of Mokhaiotl board's counts as last read (also kept on the profile), or null */
 	private JsonElement delveSeen;
+	/** (11/14/2026) the bank changed on this tick (sent a few ticks after the last change), or -1 */
+	private int bankChanged = -1;
+	/** (11/16/2026) the deathbank as it was last seen, {where, locked, ids, quantities}, sent a couple of ticks after
+	 *  it last changed (a withdrawal of several goes once); the tick it changed, or -1 */
+	private Object[] deathbankSeen;
+	private int deathbankChanged = -1;
+	/** (11/16/2026, Jace: "make it fill in the moment they die too") what they carried and wore as they fell, {ids,
+	 *  how many}, the region they fell in and the tick; the game's line that a deathbank was made, once it comes */
+	private int[][] deathCarried;
+	private int deathRegion = -1;
+	private int deathTick = -1;
+	private String deathLine;
 	private static final MediaType JSON = MediaType.parse("application/json");
 	/** the board beside the Doom of Mokhaiotl (the Delve Calculator plugin's: its scoreboard interface, each level's
 	 *  count in child 46 + 3 a level, 1 to 8, then the waves past 8) */
@@ -194,6 +224,7 @@ public class OutsidePlugin extends Plugin
 		panel.who(a == null ? null : a.getChannel());
 		if (a != null)
 		{
+			readMotions();
 			readProof();
 		}
 	}
@@ -236,6 +267,7 @@ public class OutsidePlugin extends Plugin
 		{
 			Attach a = key();
 			panel.who(a == null ? null : a.getChannel());
+			readMotions();
 			readProof();
 			readAccess();
 		}
@@ -259,6 +291,27 @@ public class OutsidePlugin extends Plugin
 			none.add("presence", JsonNull.INSTANCE);
 			post(none, null);
 			presence.unsent();
+		}
+		// (the model: on, it goes now; off, it's taken down. The bank: off, it's taken down; on, it goes next time it's used)
+		if (e.getKey().equals("model"))
+		{
+			if (config.model())
+			{
+				clientThread.invokeLater(this::sendModel);
+			}
+			else
+			{
+				keep("model", null);
+			}
+		}
+		if (e.getKey().equals("bank") && !config.bank())
+		{
+			keep("bank", null);
+		}
+		if (e.getKey().equals("deathbank") && !config.deathbank())
+		{
+			deathbankChanged = -1;
+			keep("deathbank", null);
 		}
 	}
 
@@ -325,13 +378,28 @@ public class OutsidePlugin extends Plugin
 			characterChanged();
 		}
 		ticks++;
+		// (the bank: sent three ticks after it last changed, so a whole deposit goes once)
+		if (bankChanged >= 0 && ticks - bankChanged >= 3)
+		{
+			bankChanged = -1;
+			sendBank();
+		}
+		deathbankFromDeath();
+		if (deathbankChanged >= 0 && ticks - deathbankChanged >= 2)
+		{
+			deathbankChanged = -1;
+			sendDeathbank();
+		}
 		// (where they are, read every tick, the relay in reach or not: somewhere dangerous holds things back at once)
 		WorldPoint at = here();
 		int x = at == null ? -1 : at.getX(), y = at == null ? -1 : at.getY(), region = at == null ? -1 : at.getRegionID();
+		boolean riskyWorld = riskyWorld();
 		boolean wild = wilderness(x, y, client.getVarbitValue(VarbitID.INSIDE_WILDERNESS) == 1);
 		boolean pvpArea = pvpArea(x, y, region, client.getVarbitValue(VarbitID.PVP_AREA_CLIENT) == 1);
 		// (the snapshot and what they're doing, 11/16/2026: never from anywhere dangerous, whatever else is switched on)
 		snapTick(held(pvpWorld(), wild, pvpArea), at, me);
+		boolean safe = globeSafe(riskyWorld, wild, pvpArea);
+		long ms = System.currentTimeMillis();
 	}
 
 	// ---- the snapshot, and what they're doing as Discord shows it (11/16/2026, the Plugin Hub's answer;
@@ -405,6 +473,7 @@ public class OutsidePlugin extends Plugin
 				{
 					clogNew.removeAll(named);
 				}
+				sendHeldKeeps();   // (the Hub's version: the bank and the deathbank, held since they looked)
 				showSnap();
 			}
 		});
@@ -853,6 +922,28 @@ public class OutsidePlugin extends Plugin
 		{
 			barrelSeen = slots(e.getItemContainer(), 5);
 		}
+		else if (e.getContainerId() == InventoryID.BANK && config.bank())
+		{
+			bankChanged = ticks;
+		}
+		// (a deathbank's window fills GRAVESTONE too, as a gravestone's does: the gravestone's own window open, it's a
+		// gravestone's, not sent; read now, while the window's IF1 says which deathbank it is)
+		else if (e.getContainerId() == InventoryID.GRAVESTONE && config.deathbank()
+			&& client.getWidget(InterfaceID.GravestoneGeneric.UNIVERSE) == null)
+		{
+			Object[] where = Kept.deathbankWhere(client.getVarpValue(VarPlayerID.IF1));
+			Item[] items = e.getItemContainer() == null ? new Item[0] : e.getItemContainer().getItems();
+			int[] ids = new int[items.length];
+			int[] qs = new int[items.length];
+			for (int i = 0; i < items.length; i++)
+			{
+				ids[i] = items[i].getId();
+				qs[i] = items[i].getQuantity();
+			}
+			// (no deathbank's window open and nothing in it: emptied as they took the last out)
+			deathbankSeen = where == null ? new Object[]{"", false, new int[0], new int[0], false} : new Object[]{where[0], where[1], ids, qs, false};
+			deathbankChanged = ticks;
+		}
 	}
 
 	// ---- (11/14/2026) charges, the delve board, the bank and the model: Kept
@@ -889,6 +980,10 @@ public class OutsidePlugin extends Plugin
 			{
 				configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "counts", gson.toJson(counts.json()));
 			}
+		}
+		if (e.getType() == ChatMessageType.GAMEMESSAGE || e.getType() == ChatMessageType.SPAM)
+		{
+			deathbankLine(Text.removeTags(e.getMessage()));
 		}
 		if (!config.charges() || (e.getType() != ChatMessageType.GAMEMESSAGE && e.getType() != ChatMessageType.SPAM))
 		{
@@ -964,6 +1059,53 @@ public class OutsidePlugin extends Plugin
 		}
 	}
 
+	/** ::outsidemodel: the model again, as they look now. */
+	@Subscribe
+	public void onCommandExecuted(CommandExecuted e)
+	{
+		if ("outsideforget".equalsIgnoreCase(e.getCommand()))
+		{
+			String name = motionName(e.getArguments());
+			if (name == null || e.getArguments().length == 0)
+			{
+				say("which motion? ::outsideforget and its name");
+				return;
+			}
+			keep("motion", name, null);
+			say("taking the motion \"" + name + "\" off your page");
+			return;
+		}
+		if ("outsidemotion".equalsIgnoreCase(e.getCommand()))
+		{
+			if (config.model())
+			{
+				String name = motionName(e.getArguments());
+				if (e.getArguments().length > 0 && name == null)
+				{
+					say("a motion's name: up to 24 letters, numbers, spaces, - or _");
+					return;
+				}
+				armMotion(name);
+			}
+			else
+			{
+				say("switch on \"My character's model on my page\" in the plugin's settings first");
+			}
+			return;
+		}
+		if ("outsidemodel".equalsIgnoreCase(e.getCommand()))
+		{
+			if (config.model())
+			{
+				sendModel();
+			}
+			else
+			{
+				say("switch on \"My character's model on my page\" in the plugin's settings first");
+			}
+		}
+	}
+
 	/** The side tab's icon: a lime ✼, drawn here (no picture to ship). */
 	private static java.awt.image.BufferedImage tabIcon()
 	{
@@ -987,11 +1129,75 @@ public class OutsidePlugin extends Plugin
 	{
 		return new OutsidePanel.Hooks()
 		{
+			@Override
+			public void capture(String name)
+			{
+				clientThread.invokeLater(() ->
+				{
+					if (!config.model())
+					{
+						panel.status("switch on \"My character's model on my page\" in the plugin's settings first");
+						return;
+					}
+					if (client.getLocalPlayer() == null)
+					{
+						panel.status("log in first");
+						return;
+					}
+					String n = name.isEmpty() ? null : motionName(name.split("\\s+"));
+					if (!name.isEmpty() && n == null)
+					{
+						panel.status("a name: up to 24 letters, numbers, spaces, - or _");
+						return;
+					}
+					armMotion(n);
+				});
+			}
 
 			@Override
 			public void refresh()
 			{
+				readMotions();
 				readProof();
+			}
+
+			@Override
+			public void first(String name)
+			{
+				Attach a = key();
+				if (a == null)
+				{
+					return;
+				}
+				String url = a.keepUrl("motions") + "&first=" + java.net.URLEncoder.encode(name, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20");
+				http.newCall(new Request.Builder().url(url).header("User-Agent", "outside-plugin/" + VERSION).post(RequestBody.create(JSON, "")).build()).enqueue(new Callback()
+				{
+					@Override
+					public void onFailure(Call call, IOException ex)
+					{
+						panel.status("the relay's out of reach");
+					}
+
+					@Override
+					public void onResponse(Call call, Response r)
+					{
+						r.close();
+						panel.status(name.isEmpty() ? "your page shows your model standing still first" : "your page shows \"" + name + "\" first");
+					}
+				});
+			}
+
+			@Override
+			public void forget(String name)
+			{
+				keep("motion", name, null);
+			}
+
+			@Override
+			public void removeModel()
+			{
+				keep("model", null);
+				panel.status("taking your model off your page");
 			}
 
 			@Override
@@ -1284,6 +1490,7 @@ public class OutsidePlugin extends Plugin
 		{
 			panel.who(a == null ? null : a.getChannel());
 			panel.otherKey(any != null && a == null ? any.getChannel() : null, character);
+			readMotions();
 			readProof();
 			readAccess();
 		}
@@ -1495,6 +1702,847 @@ public class OutsidePlugin extends Plugin
 		});
 	}
 
+	private void readMotions()
+	{
+		Attach a = key();
+		if (a == null || panel == null)
+		{
+			return;
+		}
+		String url = a.keepUrl("motions").replaceFirst("\\?key=[^&]*", "?code=");
+		http.newCall(new Request.Builder().url(url).header("User-Agent", "outside-plugin/" + VERSION).build()).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				panel.showMotions(null, "");
+			}
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				try
+				{
+					String t = r.body() == null ? "" : r.body().string();
+					JsonObject o = gson.fromJson(t, JsonObject.class);
+					List<OutsidePanel.Motion> list = new ArrayList<>();
+					if (o != null && o.has("motions"))
+					{
+						for (JsonElement e : o.getAsJsonArray("motions"))
+						{
+							JsonObject m = e.getAsJsonObject();
+							list.add(new OutsidePanel.Motion(m.get("name").getAsString(), m.has("frames") ? m.get("frames").getAsInt() : 0));
+						}
+					}
+					panel.showMotions(list, o != null && o.has("first") && !o.get("first").isJsonNull() ? o.get("first").getAsString() : (list.stream().anyMatch(m -> "idle".equals(m.name)) ? "idle" : ""));
+				}
+				catch (IOException | RuntimeException ex)
+				{
+					panel.showMotions(null, "");
+				}
+				finally
+				{
+					r.close();
+				}
+			}
+		});
+	}
+
+	private void sendModel()
+	{
+		Player me = client.getLocalPlayer();
+		Model m = me == null ? null : me.getModel();
+		if (m == null)
+		{
+			say("your model isn't there to send yet: try ::outsidemodel in a moment");
+			return;
+		}
+		// (each written out the moment it's read: the client hands out one shared model for anything animated, so reading
+		// the pet's after the player's overwrote the player's; 11/15/2026, Jace saw only his pet)
+		Snap snap = snap(m, true);
+		// (11/15/2026: their effects as they are now, each a model of its own, and the ground round them if they let it go)
+		List<Fx> fx = effects(me, null);
+		JsonObject player = Kept.trim(snap.json, ownOf(snap, fx));
+		addEffects(player, fx);
+		addGround(player, me);
+		Model pet = petModel();
+		keep("model", wholeModel(player, pet == null ? null : modelJson(pet), null, null));
+	}
+
+	/** The pet following them (11/15/2026, Jace: "one thing i would like to have it do is capture the pet"), or null. */
+	private Model petModel()
+	{
+		NPC pet = client.getFollower();
+		return pet == null ? null : pet.getModel();
+	}
+
+	// ---- effects and the ground (11/15/2026, Jace: "can you build the effects (spot animations) and the ground into the
+	// model viewer/capturer?"). Effects: each spot animation on them (a special attack's, a teleport's, an emote's), its
+	// own model raised by its height, kept apart from theirs (Kept.ownVertices: the client may merge them into the
+	// player's model), so the page can draw them, and a motion's frames carry them frame by frame. The ground: the tiles
+	// round them (GROUND_TILES each way) as the scene has them, painted and shaped, turned into their model's own space;
+	// only with "The ground under my model" on, and only on a capture they ask for (never the live view's own).
+
+	private static final int GROUND_TILES = 5, FX_MOST = 4, FX_MODELS = 8;
+
+	/** A model read at once (the client's model object is shared): its vertices copied, and as JSON if asked. */
+	private static final class Snap
+	{
+		JsonObject json;
+		float[] x, z, y;
+		int n;
+	}
+
+	private Snap snap(Model m, boolean json)
+	{
+		Snap s = new Snap();
+		s.n = m.getVerticesCount();
+		s.x = java.util.Arrays.copyOf(m.getVerticesX(), s.n);
+		s.y = java.util.Arrays.copyOf(m.getVerticesY(), s.n);
+		s.z = java.util.Arrays.copyOf(m.getVerticesZ(), s.n);
+		s.json = json ? modelJson(m) : null;
+		return s;
+	}
+
+	/** One effect on them now: its key (id, vertices, faces), its vertices (raised by its height), and its model as
+	 *  JSON unless it's one already known. */
+	private static final class Fx
+	{
+		String key;
+		JsonObject json;
+		float[] x, y, z;
+		int n;
+	}
+
+	private List<Fx> effects(Player me, Set<String> known)
+	{
+		List<Fx> out = new ArrayList<>();
+		if (me.getSpotAnims() == null)
+		{
+			return out;
+		}
+		for (ActorSpotAnim sa : me.getSpotAnims())
+		{
+			if (out.size() >= FX_MOST)
+			{
+				break;
+			}
+			Model m = sa.getModel();
+			if (m == null || m.getVerticesCount() <= 0 || m.getFaceCount() <= 0)
+			{
+				continue;
+			}
+			Fx f = new Fx();
+			f.n = m.getVerticesCount();
+			f.key = sa.getId() + "." + f.n + "." + m.getFaceCount();
+			f.x = java.util.Arrays.copyOf(m.getVerticesX(), f.n);
+			f.y = java.util.Arrays.copyOf(m.getVerticesY(), f.n);
+			f.z = java.util.Arrays.copyOf(m.getVerticesZ(), f.n);
+			for (int i = 0; i < f.n; i++)
+			{
+				f.y[i] -= sa.getHeight();
+			}
+			if (known == null || !known.contains(f.key))
+			{
+				f.json = Kept.model(f.x, f.y, f.z, f.n, m.getFaceIndices1(), m.getFaceIndices2(), m.getFaceIndices3(), m.getFaceCount(),
+					m.getFaceColors1(), m.getFaceColors2(), m.getFaceColors3(), m.getUnlitFaceColors(), m.getFaceTransparencies(),
+					m.getFaceTextures(), m.getFaceRenderPriorities(), m.getTextureFaces(), m.getTexIndices1(), m.getTexIndices2(),
+					m.getTexIndices3());
+			}
+			out.add(f);
+		}
+		return out;
+	}
+
+	/** How many of the snapped model's vertices are the player's own (the effects merged after them, in either order). */
+	private static int ownOf(Snap s, List<Fx> fx)
+	{
+		if (fx == null || fx.isEmpty())
+		{
+			return s.n;
+		}
+		for (int pass = 0; pass < 2; pass++)
+		{
+			List<Fx> l = new ArrayList<>(fx);
+			if (pass == 1)
+			{
+				java.util.Collections.reverse(l);
+			}
+			List<float[]> xs = new ArrayList<>(), zs = new ArrayList<>();
+			int[] counts = new int[l.size()];
+			for (int k = 0; k < l.size(); k++)
+			{
+				xs.add(l.get(k).x);
+				zs.add(l.get(k).z);
+				counts[k] = l.get(k).n;
+			}
+			int own = Kept.ownVertices(s.x, s.z, s.n, xs, zs, counts);
+			if (own != s.n)
+			{
+				return own;
+			}
+		}
+		return s.n;
+	}
+
+	/** The still capture's effects: "fx", each a model. */
+	private static void addEffects(JsonObject o, List<Fx> fx)
+	{
+		JsonArray a = new JsonArray();
+		for (Fx f : fx)
+		{
+			if (f.json != null)
+			{
+				a.add(f.json);
+			}
+		}
+		if (a.size() > 0)
+		{
+			o.add("fx", a);
+		}
+	}
+
+	/** A motion's effects, frame by frame: each effect's model once ("m", by its key), then each frame's effects there,
+	 *  their key and their vertices then ("f", one list a frame). */
+	private static final class FxTrack
+	{
+		final Map<String, JsonObject> models = new LinkedHashMap<>();
+		final List<JsonArray> rows = new ArrayList<>();
+
+		void add(List<Fx> fx)
+		{
+			JsonArray row = new JsonArray();
+			for (Fx f : fx)
+			{
+				if (!models.containsKey(f.key))
+				{
+					if (f.json == null || models.size() >= FX_MODELS)
+					{
+						continue;
+					}
+					models.put(f.key, f.json);
+				}
+				JsonObject e = new JsonObject();
+				e.addProperty("k", f.key);
+				e.addProperty("v", Kept.frame(f.x, f.y, f.z, f.n));
+				row.add(e);
+			}
+			rows.add(row);
+		}
+
+		void into(JsonObject frames)
+		{
+			if (models.isEmpty())
+			{
+				return;
+			}
+			JsonObject fx = new JsonObject(), m = new JsonObject();
+			models.forEach(m::add);
+			JsonArray f = new JsonArray();
+			rows.forEach(f::add);
+			fx.add("m", m);
+			fx.add("f", f);
+			frames.add("fx", fx);
+		}
+	}
+
+	/** The ground round them, with "The ground under my model" on: "ground", a model in theirs's own space. */
+	private void addGround(JsonObject o, Player me)
+	{
+		if (!config.ground())
+		{
+			return;
+		}
+		try
+		{
+			JsonObject g = groundJson(me);
+			if (g != null && g.getAsJsonArray("f").size() > 0)
+			{
+				o.add("ground", g);
+			}
+		}
+		catch (RuntimeException ex)
+		{
+			log.debug("outside: the ground", ex);
+		}
+	}
+
+	private JsonObject groundJson(Player me)
+	{
+		WorldView wv = me.getWorldView();
+		LocalPoint lp = me.getLocalLocation();
+		if (wv == null || lp == null)
+		{
+			return null;
+		}
+		Scene scene = wv.getScene();
+		int plane = wv.getPlane();
+		Tile[][][] tiles = scene.getTiles();
+		int[][][] hs = wv.getTileHeights();
+		int px = lp.getX(), py = lp.getY(), ph = Perspective.getTileHeight(client, lp, plane);
+		// (the client turns a model by its orientation as it draws it (Perspective.modelToCanvas): x' = x cos + z sin,
+		// z' = z cos - x sin; the ground's turned back the other way into the model's own space)
+		double ang = me.getOrientation() * Math.PI / 1024.0, cs = Math.cos(ang), sn = Math.sin(ang);
+		int sx0 = lp.getSceneX(), sy0 = lp.getSceneY();
+		List<int[]> tris = new ArrayList<>();
+		for (int dx = -GROUND_TILES; dx <= GROUND_TILES; dx++)
+		{
+			for (int dy = -GROUND_TILES; dy <= GROUND_TILES; dy++)
+			{
+				int x = sx0 + dx, y = sy0 + dy;
+				if (x < 0 || y < 0 || x >= tiles[plane].length - 1 || y >= tiles[plane][x].length - 1)
+				{
+					continue;
+				}
+				Tile t = tiles[plane][x][y];
+				if (t == null)
+				{
+					continue;
+				}
+				int bx = x * 128, by = y * 128;
+				SceneTilePaint p = t.getSceneTilePaint();
+				if (p != null)
+				{
+					int tex = p.getTexture();
+					int[] sw = {bx, hs[plane][x][y], by}, se = {bx + 128, hs[plane][x + 1][y], by};
+					int[] ne = {bx + 128, hs[plane][x + 1][y + 1], by + 128}, nw = {bx, hs[plane][x][y + 1], by + 128};
+					tris.add(tri(ne, nw, se, p.getNeColor(), p.getNwColor(), p.getSeColor(), tex, bx, by, px, py, ph, cs, sn));
+					tris.add(tri(sw, se, nw, p.getSwColor(), p.getSeColor(), p.getNwColor(), tex, bx, by, px, py, ph, cs, sn));
+				}
+				SceneTileModel tm = t.getSceneTileModel();
+				if (tm != null && tm.getFaceX() != null)
+				{
+					int[] fa = tm.getFaceX(), fb = tm.getFaceY(), fc = tm.getFaceZ(), vx = tm.getVertexX(), vy = tm.getVertexY(), vz = tm.getVertexZ();
+					int[] ca = tm.getTriangleColorA(), cb = tm.getTriangleColorB(), cc = tm.getTriangleColorC(), tt = tm.getTriangleTextureId();
+					for (int i = 0; i < fa.length; i++)
+					{
+						int[] a = {vx[fa[i]], vy[fa[i]], vz[fa[i]]}, b = {vx[fb[i]], vy[fb[i]], vz[fb[i]]}, c = {vx[fc[i]], vy[fc[i]], vz[fc[i]]};
+						tris.add(tri(a, b, c, ca[i], cb[i], cc[i], tt == null ? -1 : tt[i], bx, by, px, py, ph, cs, sn));
+					}
+				}
+			}
+		}
+		return Kept.ground(tris);
+	}
+
+	/** One of the ground's triangles as Kept.ground takes it: each corner (x, height, the scene's y) moved into the
+	 *  player's model space, its colours, its texture and each corner's place on its tile as u, v. */
+	private static int[] tri(int[] a, int[] b, int[] c, int ca, int cb, int cc, int tex, int bx, int by, int px, int py, int ph, double cs, double sn)
+	{
+		int[] q = new int[19];
+		int[][] k = {a, b, c};
+		for (int i = 0; i < 3; i++)
+		{
+			double dx = k[i][0] - px, dz = k[i][2] - py;
+			q[i * 3] = (int) Math.round(dx * cs - dz * sn);
+			q[i * 3 + 1] = k[i][1] - ph;
+			q[i * 3 + 2] = (int) Math.round(dz * cs + dx * sn);
+			q[13 + i * 2] = Math.round((k[i][0] - bx) / 128f * 4096);
+			q[14 + i * 2] = Math.round((k[i][2] - by) / 128f * 4096);
+		}
+		q[9] = ca;
+		q[10] = cb;
+		q[11] = cc;
+		q[12] = tex;
+		return q;
+	}
+
+	private JsonObject modelJson(Model m)
+	{
+		// (11/15/2026: the game's own lighting and textures too, for the page to draw it as the game does)
+		return Kept.model(m.getVerticesX(), m.getVerticesY(), m.getVerticesZ(), m.getVerticesCount(),
+			m.getFaceIndices1(), m.getFaceIndices2(), m.getFaceIndices3(), m.getFaceCount(),
+			m.getFaceColors1(), m.getFaceColors2(), m.getFaceColors3(), m.getUnlitFaceColors(), m.getFaceTransparencies(),
+			m.getFaceTextures(), m.getFaceRenderPriorities(), m.getTextureFaces(), m.getTexIndices1(), m.getTexIndices2(),
+			m.getTexIndices3());
+	}
+
+	/** The player's model, their pet's beside it (if one's following), each with the frames of a motion if one was
+	 *  recorded, every texture either uses and the brightness the player has the game at (the palette's). */
+	private JsonObject wholeModel(JsonObject o, JsonObject petJson, JsonObject frames, JsonObject petFrames)
+	{
+		JsonObject pet = petJson;
+		if (frames != null)
+		{
+			o.add("frames", frames);
+		}
+		if (pet != null)
+		{
+			JsonObject p = pet;
+			if (petFrames != null)
+			{
+				p.add("frames", petFrames);
+			}
+			o.add("pet", p);
+		}
+		// each texture it uses, as the client has it (128 x 128, 0 a see-through texel), a PNG each
+		JsonObject pics = new JsonObject();
+		List<JsonObject> parts = new ArrayList<>();
+		parts.add(o);
+		if (pet != null)
+		{
+			parts.add(o.getAsJsonObject("pet"));
+		}
+		// (11/15/2026: the effects' and the ground's textures too)
+		if (o.has("ground"))
+		{
+			parts.add(o.getAsJsonObject("ground"));
+		}
+		if (o.has("fx"))
+		{
+			o.getAsJsonArray("fx").forEach(e -> parts.add(e.getAsJsonObject()));
+		}
+		if (o.has("frames") && o.getAsJsonObject("frames").has("fx"))
+		{
+			o.getAsJsonObject("frames").getAsJsonObject("fx").getAsJsonObject("m").entrySet().forEach(e -> parts.add(e.getValue().getAsJsonObject()));
+		}
+		for (JsonObject part : parts)
+		{
+			if (!part.has("t") || client.getTextureProvider() == null)
+			{
+				continue;
+			}
+			for (JsonElement e : part.getAsJsonArray("t"))
+			{
+				int id = e.getAsInt();
+				if (id < 0 || pics.has(String.valueOf(id)) || pics.size() >= 16)
+				{
+					continue;
+				}
+				String png = texturePng(id);
+				if (png != null)
+				{
+					pics.addProperty(String.valueOf(id), png);
+				}
+			}
+		}
+		if (pics.size() > 0)
+		{
+			o.add("tex", pics);
+		}
+		if (client.getTextureProvider() != null)
+		{
+			o.addProperty("b", Math.round(client.getTextureProvider().getBrightness() * 1000) / 1000.0);
+		}
+		return o;
+	}
+
+	// ---- the motion loop (11/15/2026, Jace: "build the pet and the motion loop"): ::outsidemotion gets ready, then
+	// records the next animation they do (an emote, a special attack), from its start to its end, at most MOTION_MOST
+	// frames; nothing begun within MOTION_WAIT, it records their stance standing (its breathing) for MOTION_IDLE. A frame
+	// every MOTION_EVERY client cycles (20 ms each: 12.5 frames a second), the pet's with the player's.
+	private static final int MOTION_EVERY = 4, MOTION_MOST = 50, MOTION_WAIT = 400, MOTION_IDLE = 150;
+	private int motionArmed = -1, motionStart = -1, motionLast;
+	private boolean motionIdle;
+	private JsonObject motionBase, motionPet;
+	private FxTrack motionFx = new FxTrack(), autoFx = new FxTrack();
+	private int motionCount, motionPetCount;
+	private final List<String> motionFrames = new ArrayList<>(), motionPetFrames = new ArrayList<>();
+
+	/** A motion's name from the command's words (lower case), or null: none given, or not a name the relay takes. */
+	static String motionName(String[] args)
+	{
+		if (args == null || args.length == 0)
+		{
+			return null;
+		}
+		String n = String.join(" ", args).trim().toLowerCase();
+		return n.matches("[a-z0-9_ -]{1,24}") ? n : null;
+	}
+
+	/** the name the motion being recorded goes under (null: "idle" if they stood, "motion" if they did something) */
+	private String motionAs;
+
+	private void armMotion(String name)
+	{
+		motionAs = name;
+		motionArmed = client.getGameCycle();
+		if (panel != null)
+		{
+			panel.capturing(true);
+		}
+		motionStart = -1;
+		say("recording the next thing you do (an emote, a special attack): do it now. Nothing in 8 seconds, and it records you standing.");
+	}
+
+	@Subscribe
+	public void onClientTick(net.runelite.api.events.ClientTick e)
+	{
+		if (motionArmed < 0)
+		{
+			return;
+		}
+		Player me = client.getLocalPlayer();
+		if (me == null)
+		{
+			motionArmed = -1;
+			if (panel != null)
+			{
+				panel.capturing(false);
+			}
+			return;
+		}
+		int now = client.getGameCycle();
+		if (motionStart < 0)
+		{
+			boolean moving = me.getAnimation() != -1;
+			if (!moving && now - motionArmed < MOTION_WAIT)
+			{
+				return;
+			}
+			motionIdle = !moving;
+			motionStart = now;
+			motionLast = now - MOTION_EVERY;
+			motionFrames.clear();
+			motionPetFrames.clear();
+			// (each written out as it's read: one shared model object for anything animated)
+			Model base = me.getModel();
+			if (base == null)
+			{
+				motionArmed = -1;
+				if (panel != null)
+				{
+					panel.capturing(false);
+				}
+				return;
+			}
+			Snap bs = snap(base, true);
+			List<Fx> bfx = effects(me, null);
+			motionCount = ownOf(bs, bfx);
+			motionBase = Kept.trim(bs.json, motionCount);
+			motionFx = new FxTrack();
+			addGround(motionBase, me);
+			Model pet = petModel();
+			motionPetCount = pet == null ? 0 : pet.getVerticesCount();
+			motionPet = pet == null ? null : modelJson(pet);
+		}
+		if (now - motionLast < MOTION_EVERY)
+		{
+			return;
+		}
+		motionLast = now;
+		Model m = me.getModel();
+		Snap ms = m == null ? null : snap(m, false);
+		List<Fx> mfx = ms == null ? null : effects(me, motionFx.models.keySet());
+		if (ms != null && ownOf(ms, mfx) == motionCount)
+		{
+			motionFrames.add(Kept.frame(ms.x, ms.y, ms.z, motionCount));
+			motionFx.add(mfx);
+			Model p = motionPet == null ? null : petModel();
+			motionPetFrames.add(p != null && p.getVerticesCount() == motionPetCount
+				? Kept.frame(p.getVerticesX(), p.getVerticesY(), p.getVerticesZ(), p.getVerticesCount()) : null);
+		}
+		boolean done = motionFrames.size() >= MOTION_MOST
+			|| (motionIdle ? now - motionStart >= MOTION_IDLE : me.getAnimation() == -1 && motionFrames.size() > 2);
+		if (!done)
+		{
+			return;
+		}
+		motionArmed = -1;
+		JsonObject frames = Kept.frames(motionFrames, 1000.0 / (MOTION_EVERY * 20));
+		motionFx.into(frames);
+		JsonObject petFrames = motionPet != null && !motionPetFrames.contains(null) ? Kept.frames(motionPetFrames, 1000.0 / (MOTION_EVERY * 20)) : null;
+		say("recorded " + motionFrames.size() + " frames" + (motionIdle ? " of you standing" : "") + ": sending it to your page");
+		// (11/15/2026, Jace: "build the motion library": kept under its name beside the others)
+		String name = motionAs != null ? motionAs : motionIdle ? "idle" : "motion";
+		say("it goes on your page as \"" + name + "\"");
+		// (the side tab's one button, 11/15/2026: the still model goes too, from the motion's first moment)
+		keep("model", wholeModel(motionBase.deepCopy(), motionPet == null ? null : motionPet.deepCopy(), null, null));
+		keep("motion", name, wholeModel(motionBase, motionPet, frames, petFrames));
+		if (panel != null)
+		{
+			panel.capturing(false);
+		}
+	}
+
+	/** A texture as the client has it, a PNG in base64 (0 a see-through texel), or null. */
+	private String texturePng(int id)
+	{
+		try
+		{
+			int[] px = client.getTextureProvider().load(id);
+			int size = px == null ? 0 : (int) Math.round(Math.sqrt(px.length));
+			if (size == 0 || size * size != px.length)
+			{
+				return null;
+			}
+			java.awt.image.BufferedImage im = new java.awt.image.BufferedImage(size, size, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+			for (int i = 0; i < px.length; i++)
+			{
+				im.setRGB(i % size, i / size, px[i] == 0 ? 0 : 0xff000000 | px[i]);
+			}
+			java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+			javax.imageio.ImageIO.write(im, "png", out);
+			return java.util.Base64.getEncoder().encodeToString(out.toByteArray());
+		}
+		catch (RuntimeException | IOException e)
+		{
+			return null;
+		}
+	}
+
+	/** The whole bank, its tabs and each item's name and price (the client's thread). */
+	private void sendBank()
+	{
+		ItemContainer bank = client.getItemContainer(InventoryID.BANK);
+		if (bank == null || !config.bank())
+		{
+			return;
+		}
+		Item[] items = bank.getItems();
+		int[] ids = new int[items.length];
+		int[] qs = new int[items.length];
+		Map<Integer, Object[]> names = new LinkedHashMap<>();
+		for (int i = 0; i < items.length; i++)
+		{
+			// (a placeholder as its item, none of it)
+			int id = items[i].getId();
+			int real = id > 0 ? itemManager.canonicalize(id) : id;
+			ids[i] = real;
+			qs[i] = real != id ? 0 : items[i].getQuantity();
+			if (real > 0 && !names.containsKey(real))
+			{
+				names.put(real, new Object[]{itemManager.getItemComposition(real).getName(), (long) itemManager.getItemPrice(real)});
+			}
+		}
+		int[] tabVarbits = {VarbitID.BANK_TAB_1, VarbitID.BANK_TAB_2, VarbitID.BANK_TAB_3, VarbitID.BANK_TAB_4,
+			VarbitID.BANK_TAB_5, VarbitID.BANK_TAB_6, VarbitID.BANK_TAB_7, VarbitID.BANK_TAB_8, VarbitID.BANK_TAB_9};
+		int[] tabs = new int[9];
+		for (int i = 0; i < 9; i++)
+		{
+			tabs[i] = client.getVarbitValue(tabVarbits[i]);
+		}
+		keep("bank", Kept.bank(ids, qs, tabs, names));
+	}
+
+	/** Their own death (11/16/2026): what they carried and wore as they fell, and where. */
+	@Subscribe
+	public void onActorDeath(ActorDeath e)
+	{
+		Player me = client.getLocalPlayer();
+		if (!config.deathbank() || me == null || e.getActor() != me)
+		{
+			return;
+		}
+		List<Item> all = new ArrayList<>();
+		for (int id : new int[]{InventoryID.INV, InventoryID.WORN})
+		{
+			ItemContainer c = client.getItemContainer(id);
+			if (c != null)
+			{
+				java.util.Collections.addAll(all, c.getItems());
+			}
+		}
+		deathCarried = new int[2][all.size()];
+		for (int i = 0; i < all.size(); i++)
+		{
+			deathCarried[0][i] = all.get(i).getId();
+			deathCarried[1][i] = all.get(i).getQuantity();
+		}
+		WorldPoint at = here();
+		deathRegion = at == null ? -1 : at.getRegionID();
+		deathTick = ticks;
+		deathLine = null;
+	}
+
+	/** The game's line that a death made a deathbank: once they're back on their feet, deathbankFromDeath sends it. */
+	private void deathbankLine(String said)
+	{
+		if (deathTick >= 0 && said != null && said.startsWith(Kept.DEATHBANK_LINE))
+		{
+			deathLine = said;
+		}
+	}
+
+	/** Each tick: a death the game said made a deathbank, once they're back (their hitpoints restored, a few ticks on),
+	 *  sent as what it took (Kept.lost), "from" the death; a death with no such line within half an hour, forgotten.
+	 *  Locked (its fee unpaid), but an ultimate ironman's Zulrah's, which has none. */
+	private void deathbankFromDeath()
+	{
+		if (deathTick < 0)
+		{
+			return;
+		}
+		if (!config.deathbank() || ticks - deathTick > 3000)
+		{
+			deathTick = -1;
+			deathCarried = null;
+			deathLine = null;
+			return;
+		}
+		int hp = client.getBoostedSkillLevel(Skill.HITPOINTS);
+		if (deathLine == null || ticks - deathTick < 3 || hp < Math.min(10, client.getRealSkillLevel(Skill.HITPOINTS)))
+		{
+			return;
+		}
+		List<Item> now = new ArrayList<>();
+		for (int id : new int[]{InventoryID.INV, InventoryID.WORN})
+		{
+			ItemContainer c = client.getItemContainer(id);
+			if (c != null)
+			{
+				java.util.Collections.addAll(now, c.getItems());
+			}
+		}
+		int[] ids = new int[now.size()];
+		int[] qs = new int[now.size()];
+		for (int i = 0; i < now.size(); i++)
+		{
+			ids[i] = now.get(i).getId();
+			qs[i] = now.get(i).getQuantity();
+		}
+		int[][] lost = Kept.lost(deathCarried[0], deathCarried[1], ids, qs);
+		String where = Kept.deathbankAt(deathLine, deathRegion);
+		boolean locked = !("Zulrah".equals(where) && client.getVarbitValue(VarbitID.IRONMAN) == 2);
+		deathTick = -1;
+		deathCarried = null;
+		deathLine = null;
+		if (lost[0].length > 0)
+		{
+			deathbankSeen = new Object[]{where, locked, lost[0], lost[1], true};
+			deathbankChanged = ticks;
+		}
+	}
+
+	/** The deathbank as last seen (deathbankSeen), each item's name and price; emptied, taken off the page (the client's thread). */
+	private void sendDeathbank()
+	{
+		Object[] d = deathbankSeen;
+		if (d == null || !config.deathbank())
+		{
+			return;
+		}
+		int[] ids = (int[]) d[2];
+		int[] qs = (int[]) d[3];
+		Map<Integer, Object[]> names = new LinkedHashMap<>();
+		for (int i = 0; i < ids.length; i++)
+		{
+			int id = ids[i];
+			if (id > 0 && qs[i] > 0 && !names.containsKey(id))
+			{
+				names.put(id, new Object[]{itemManager.getItemComposition(id).getName(), (long) itemManager.getItemPrice(id)});
+			}
+		}
+		JsonObject body = Kept.deathbank((String) d[0], (boolean) d[1], ids, qs, names, (boolean) d[4]);
+		keep("deathbank", body);
+	}
+
+	/* (11/17/2026, the Hub's update 2: the bank and the deathbank on the page, under the reviewer's terms, "an 'Update my
+	   page' action and an hourly sync": in the Hub's version each is read as now, when they look in it, and held here,
+	   the latest of each, till the next update takes it (Update my page, or the hourly one); the model, captured by their
+	   own press, goes at once, and a switch turned off takes its part down at once. The whole plugin sends each at once.) */
+	private final Map<String, JsonObject> keepHeld = new LinkedHashMap<>();
+	static final boolean HOLD_KEEPS = true;
+
+	/** Whether this keep waits for the next update (the Hub's version): the bank's or the deathbank's, not a take-down. */
+	private boolean holdKeep(String what, JsonObject body)
+	{
+		if (body == null || !("bank".equals(what) || "deathbank".equals(what)))
+		{
+			synchronized (keepHeld)
+			{
+				keepHeld.remove(what);   // (a take-down: nothing held of it goes later)
+			}
+			return false;
+		}
+		boolean first;
+		synchronized (keepHeld)
+		{
+			first = keepHeld.put(what, body) == null;
+		}
+		if (first)
+		{
+			say("your " + what + " goes up with your next update (Update my page, or the hourly one)");
+		}
+		return true;
+	}
+
+	/** What's held goes, after an update's gone. */
+	private void sendHeldKeeps()
+	{
+		Map<String, JsonObject> due;
+		synchronized (keepHeld)
+		{
+			due = new LinkedHashMap<>(keepHeld);
+			keepHeld.clear();
+		}
+		due.forEach(this::sendKeep);
+	}
+
+	/** Sent to the relay's keep (POST; null: DELETE), off the client's thread; a failure said in the chat. */
+	private void keep(String what, JsonObject body)
+	{
+		keep(what, null, body);
+	}
+
+	private void keep(String what, String name, JsonObject body)
+	{
+		if (name == null && HOLD_KEEPS && holdKeep(what, body))
+		{
+			return;
+		}
+		sendKeep(what, name, body);
+	}
+
+	private void sendKeep(String what, JsonObject body)
+	{
+		sendKeep(what, null, body);
+	}
+
+	private void sendKeep(String what, String name, JsonObject body)
+	{
+		Attach a = key();
+		if (a == null || !config.send())
+		{
+			return;
+		}
+		String url = a.keepUrl(what) + (name == null ? "" : "&name=" + java.net.URLEncoder.encode(name, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20"));
+		Request.Builder b = new Request.Builder().url(url).header("User-Agent", "outside-plugin/" + VERSION);
+		b = body == null ? b.delete() : b.post(RequestBody.create(JSON, gson.toJson(body)));
+		http.newCall(b.build()).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				log.debug("outside: keep {} failed", what, ex);
+			}
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				int code = r.code();
+				String why = "";
+				try
+				{
+					// (the relay's own words for what it refused: {"error": "..."})
+					String t = r.body() == null ? "" : r.body().string();
+					JsonObject e = t.startsWith("{") ? gson.fromJson(t, JsonObject.class) : null;
+					why = e != null && e.has("error") ? ": " + e.get("error").getAsString() : "";
+				}
+				catch (IOException | RuntimeException ex)
+				{
+					why = "";
+				}
+				r.close();
+				if ("motion".equals(what) || "model".equals(what))
+				{
+					readMotions();
+				}
+				if (body != null && code == 200)
+				{
+					if (!"encounter".equals(what))
+					{
+						say("model".equals(what) ? "your model is on your page" : "motion".equals(what) ? "the motion \"" + name + "\" is on your page" : "your " + what + " is on your page");
+					}
+				}
+				else if (body != null && code != 200)
+				{
+					say("your " + what + " didn't go up (the relay said " + code + why + ")");
+				}
+			}
+		});
+	}
+
 	/** Charges and the delve board, as kept on this RuneLite's profile for the account. */
 	/** Charges, as kept on this RuneLite's profile for the account. */
 	private void loadKept()
@@ -1627,6 +2675,28 @@ public class OutsidePlugin extends Plugin
 	}
 
 	/**
+	 * Safe for the globe's features (following and its world, the activity, the stars): not on a risky world (PvP,
+	 * Deadman, high risk, Bounty Hunter), not in the Wilderness, not in a PvP area (each as above: Ferox Enclave and the
+	 * PvP minigames are safe). Instances are (11/09/2026), unless their template lies in the Wilderness.
+	 */
+	static boolean globeSafe(boolean riskyWorld, boolean wilderness, boolean pvpArea)
+	{
+		return !riskyWorld && !wilderness && !pvpArea;
+	}
+
+	/**
+	 * Safe for the activity's label (11/10/2026, Jace: "Wilderness bosses should be included since we have the option
+	 * for 'In the Wilderness too'"): wherever the globe's features are, and in the Wilderness too (its PvP-area flag
+	 * with it) when they've said so (OutsideConfig.wilderness), since they've already chosen to transmit there. Never
+	 * on a risky world. Following and the stars stay off in the Wilderness whatever the setting (globeSafe): only the
+	 * label goes, two minutes behind as ever.
+	 */
+	static boolean activitySafe(boolean riskyWorld, boolean wilderness, boolean pvpArea, boolean wildernessToo)
+	{
+		return globeSafe(riskyWorld, wilderness, pvpArea) || (wildernessToo && wilderness && !riskyWorld);
+	}
+
+	/**
 	 * Where the stream holds (what they wear and carry, their vitals: Kit.held), unless "In the Wilderness too" is on:
 	 * a PvP or Deadman world, the Wilderness, a PvP area. Not in Ferox Enclave or a PvP minigame (11/10/2026, Jace:
 	 * "stream should keep going"), whatever the game's flags say there.
@@ -1634,6 +2704,24 @@ public class OutsidePlugin extends Plugin
 	static boolean held(boolean pvpWorld, boolean wilderness, boolean pvpArea)
 	{
 		return pvpWorld || wilderness || pvpArea;
+	}
+
+	/** On a world where nothing goes to the globe (RISKY, or any the client counts as PvP). */
+	private boolean riskyWorld()
+	{
+		EnumSet<WorldType> types = client.getWorldType();
+		if (pvpWorld())
+		{
+			return true;
+		}
+		for (WorldType t : types)
+		{
+			if (RISKY.contains(t))
+			{
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/** On a PvP or Deadman world (read here, never sent). */
