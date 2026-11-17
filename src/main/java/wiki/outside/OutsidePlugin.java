@@ -1089,7 +1089,7 @@ public class OutsidePlugin extends Plugin
 			}
 			else
 			{
-				say("switch on \"My character's model on my page\" in the plugin's settings first");
+				say("switch on \"Character model\" in the plugin's settings first");
 			}
 			return;
 		}
@@ -1101,7 +1101,7 @@ public class OutsidePlugin extends Plugin
 			}
 			else
 			{
-				say("switch on \"My character's model on my page\" in the plugin's settings first");
+				say("switch on \"Character model\" in the plugin's settings first");
 			}
 		}
 	}
@@ -1136,7 +1136,7 @@ public class OutsidePlugin extends Plugin
 				{
 					if (!config.model())
 					{
-						panel.status("switch on \"My character's model on my page\" in the plugin's settings first");
+						panel.status("switch on \"Character model\" in the plugin's settings first");
 						return;
 					}
 					if (client.getLocalPlayer() == null)
@@ -1781,7 +1781,7 @@ public class OutsidePlugin extends Plugin
 	// own model raised by its height, kept apart from theirs (Kept.ownVertices: the client may merge them into the
 	// player's model), so the page can draw them, and a motion's frames carry them frame by frame. The ground: the tiles
 	// round them (GROUND_TILES each way) as the scene has them, painted and shaped, turned into their model's own space;
-	// only with "The ground under my model" on, and only on a capture they ask for (never the live view's own).
+	// only with "Ground under my model" on, and only on a capture they ask for (never the live view's own).
 
 	private static final int GROUND_TILES = 5, FX_MOST = 4, FX_MODELS = 8;
 
@@ -1946,7 +1946,7 @@ public class OutsidePlugin extends Plugin
 		}
 	}
 
-	/** The ground round them, with "The ground under my model" on: "ground", a model in theirs's own space. */
+	/** The ground round them, with "Ground under my model" on: "ground", a model in theirs's own space. */
 	private void addGround(JsonObject o, Player me)
 	{
 		if (!config.ground())
