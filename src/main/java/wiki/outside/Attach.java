@@ -112,7 +112,8 @@ public final class Attach
 	/** The snapshot's address (11/16/2026; docs/protocol.md, "The snapshot"): POST http(s)://…/game/<channel>?key=…&v=…. */
 	public String postUrl(String version)
 	{
-		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/game/" + enc(channel) + "?") + "&v=" + enc(version);
+		// (&proof=1, 11/17/2026: the answer says what the page's proof did, while it's still to be made)
+		return keepUrl("x").replaceFirst("/keep/[^?]*\\?", "/game/" + enc(channel) + "?") + "&v=" + enc(version) + "&proof=1";
 	}
 
 	/** The relay's keep for the page (11/14/2026): http(s)://…/keep/<channel>/<what>?key=… (a bare relay as https://). */
