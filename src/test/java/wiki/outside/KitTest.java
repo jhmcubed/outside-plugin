@@ -84,8 +84,8 @@ public class KitTest
 		Gson gson = new Gson(); // (a test's own; the plugin uses RuneLite's)
 		Attach a = Attach.parse("  " + code + " ", gson);
 		assertEquals("sburb", a.getChannel());
-		assertEquals("https://relay.ghillie.workers.dev/game/sburb?key=abcdefgh%2B%2F%3Dij&v=0.3.0", a.postUrl("0.3.0"));
-		assertEquals("http://127.0.0.1:8790/game/sburb?key=k&v=1", new Attach("http://127.0.0.1:8790/", "sburb", "k").postUrl("1"));
+		assertEquals("https://relay.ghillie.workers.dev/game/sburb?key=abcdefgh%2B%2F%3Dij&v=0.3.0&proof=1", a.postUrl("0.3.0"));
+		assertEquals("http://127.0.0.1:8790/game/sburb?key=k&v=1&proof=1", new Attach("http://127.0.0.1:8790/", "sburb", "k").postUrl("1"));
 		assertNull(Attach.parse("hello", gson));
 		assertNull(Attach.parse("outstation1:!!!", gson));
 	}
