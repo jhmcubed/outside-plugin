@@ -186,9 +186,28 @@ public class OutsidePanel extends PluginPanel
 		page.add(wide(button("Open my page", hooks::openPage)));
 		page.add(Box.createVerticalStrut(4));
 		page.add(wide(button("Show what's sent", () -> hooks.showSent())));
-		// (the goal item, 11/17/2026: here, by the page's own buttons, so it's found without looking for it)
-		page.add(Box.createVerticalStrut(4));
-		page.add(wide(button("Set my goal item", hooks::setGoal)));
+		snapClock.start();
+		page.add(Box.createVerticalStrut(10));
+
+		JPanel display = new JPanel();
+		display.setLayout(new BorderLayout());
+		MaterialTabGroup tabs = new MaterialTabGroup(display);
+		tabs.setLayout(new GridLayout(1, 0, 4, 0));
+		tabs.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+
+		// the page: when it goes, and what goes with it
+		JPanel pageTab = tab();
+		pageTab.add(left(small("<html><div style='width:155px'>Your page updates when you press Update my page, and by itself"
+			+ " every hour you're logged in; never from the Wilderness or a PvP world. What goes on it is in the plugin's"
+			+ " settings, each part its own switch.</div></html>")));
+		// (the goal item, 11/17/2026; in the Page tab since 11/18/2026, update 4, Jace: set once and left, not one of
+		// the buttons pressed every session, which stay above)
+		pageTab.add(Box.createVerticalStrut(12));
+		pageTab.add(left(heading("Your goal")));
+		pageTab.add(left(small("<html><div style='width:155px'>An item you're after: your page shows its 3D model, your kill"
+			+ " count where it drops and how dry you are for it.</div></html>")));
+		pageTab.add(Box.createVerticalStrut(6));
+		pageTab.add(wide(button("Set my goal item", hooks::setGoal)));
 		// (the goal set, with ✕ to take it off: 11/18/2026, update 4; ::outsidegoal clear was the only way)
 		JPanel goalRow = new JPanel(new BorderLayout(6, 0));
 		goalRow.setOpaque(false);
@@ -204,21 +223,58 @@ public class OutsidePanel extends PluginPanel
 		goalRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
 		goalRow.setVisible(false);
 		goalBox = goalRow;
-		page.add(goalRow);
-		snapClock.start();
-		page.add(Box.createVerticalStrut(10));
-
-		JPanel display = new JPanel();
-		display.setLayout(new BorderLayout());
-		MaterialTabGroup tabs = new MaterialTabGroup(display);
-		tabs.setLayout(new GridLayout(1, 0, 4, 0));
-		tabs.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
-
-		// the page: when it goes, and what goes with it
-		JPanel pageTab = tab();
-		pageTab.add(left(small("<html><div style='width:155px'>Your page updates when you press Update my page, and by itself"
-			+ " every hour you're logged in; never from the Wilderness or a PvP world. What goes on it is in the plugin's"
-			+ " settings, each part its own switch.</div></html>")));
+		pageTab.add(Box.createVerticalStrut(4));
+		pageTab.add(goalRow);
+		pageTab.add(Box.createVerticalStrut(12));
+		// (the More tab's parts, folded into the Page tab 11/18/2026, update 4, Jace: all of them are about the page;
+		// in his order: who sees it, Dink, the register, then taking it down last, on its own)
+		pageTab.add(left(heading("Who sees it")));
+		pageTab.add(left(access));
+		pageTab.add(Box.createVerticalStrut(4));
+		accessButton.addActionListener(e -> hooks.friendsOnly(!friends));
+		pageTab.add(wide(accessButton));
+		friendsLink.setLayout(new BoxLayout(friendsLink, BoxLayout.Y_AXIS));
+		friendsLink.add(Box.createVerticalStrut(4));
+		friendsLink.add(wide(button("Copy the friends' link", hooks::copyFriendsLink)));
+		friendsLink.setVisible(false);
+		pageTab.add(friendsLink);
+		accessStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		pageTab.add(left(accessStatus));
+		pageTab.add(Box.createVerticalStrut(12));
+		pageTab.add(left(heading("Field reports with Dink")));
+		pageTab.add(left(small("<html><div style='width:155px'>Use the Dink plugin? Paste this on its own line in Dink's Primary"
+			+ " Webhook URLs: what you switch on in Dink then shows on your page and the globe as it happens. Nothing from the"
+			+ " Wilderness or PvP is ever shown. It holds your page's key: keep it to yourself.</div></html>")));
+		pageTab.add(Box.createVerticalStrut(6));
+		pageTab.add(wide(button("Copy my Dink address", () -> hooks.copyDink())));
+		dinkStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		pageTab.add(left(dinkStatus));
+		pageTab.add(Box.createVerticalStrut(12));
+		// (11/16/2026, Jace: "There is currently no way for someone who doesn't have the outstation to remove comments
+		// from people off of their profile": the page opens with a link only this browser has, good for 12 hours)
+		// (11/17/2026, Jace: the page's chat, while nothing transmits, is its register: visitors sign it, you read it later)
+		pageTab.add(left(heading("Your page's register")));
+		pageTab.add(left(small("<html><div style='width:155px'>Visitors sign your page's register. Read it, take back a note or"
+			+ " ban whoever wrote it, on your page itself: the link works for 12 hours, in the browser it opens in.</div></html>")));
+		notesLine.setForeground(LIME);
+		notesLine.setVisible(false);
+		pageTab.add(left(notesLine));
+		pageTab.add(Box.createVerticalStrut(6));
+		pageTab.add(wide(button("Read and tend my register", hooks::tendChat)));
+		tendStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		pageTab.add(left(tendStatus));
+		pageTab.add(Box.createVerticalStrut(12));
+		pageTab.add(wide(button("Take my page down", () ->
+		{
+			int sure = javax.swing.JOptionPane.showConfirmDialog(this,
+				"Take your Outside page down? Everything on it goes, and the name is free for anyone to claim."
+					, "Take my page down", javax.swing.JOptionPane.OK_CANCEL_OPTION,
+				javax.swing.JOptionPane.WARNING_MESSAGE);
+			if (sure == javax.swing.JOptionPane.OK_OPTION)
+			{
+				hooks.takeDown();
+			}
+		})));
 		MaterialTab first = new MaterialTab("Page", tabs, pageTab);
 		tabs.addTab(first);
 
@@ -279,55 +335,6 @@ public class OutsidePanel extends PluginPanel
 		tabs.addTab(new MaterialTab("Model", tabs, charTab));
 
 		// more: Dink, who sees it, the page's chat, and taking the page down (last, as it can't be undone)
-		JPanel moreTab = tab();
-		moreTab.add(left(heading("Field reports with Dink")));
-		moreTab.add(left(small("<html><div style='width:155px'>Use the Dink plugin? Paste this on its own line in Dink's Primary"
-			+ " Webhook URLs: what you switch on in Dink then shows on your page and the globe as it happens. Nothing from the"
-			+ " Wilderness or PvP is ever shown. It holds your page's key: keep it to yourself.</div></html>")));
-		moreTab.add(Box.createVerticalStrut(6));
-		moreTab.add(wide(button("Copy my Dink address", () -> hooks.copyDink())));
-		dinkStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		moreTab.add(left(dinkStatus));
-		moreTab.add(Box.createVerticalStrut(12));
-		moreTab.add(left(heading("Who sees it")));
-		moreTab.add(left(access));
-		moreTab.add(Box.createVerticalStrut(4));
-		accessButton.addActionListener(e -> hooks.friendsOnly(!friends));
-		moreTab.add(wide(accessButton));
-		friendsLink.setLayout(new BoxLayout(friendsLink, BoxLayout.Y_AXIS));
-		friendsLink.add(Box.createVerticalStrut(4));
-		friendsLink.add(wide(button("Copy the friends' link", hooks::copyFriendsLink)));
-		friendsLink.setVisible(false);
-		moreTab.add(friendsLink);
-		accessStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		moreTab.add(left(accessStatus));
-		moreTab.add(Box.createVerticalStrut(12));
-		// (11/16/2026, Jace: "There is currently no way for someone who doesn't have the outstation to remove comments
-		// from people off of their profile": the page opens with a link only this browser has, good for 12 hours)
-		// (11/17/2026, Jace: the page's chat, while nothing transmits, is its register: visitors sign it, you read it later)
-		moreTab.add(left(heading("Your page's register")));
-		moreTab.add(left(small("<html><div style='width:155px'>Visitors sign your page's register. Read it, take back a note or"
-			+ " ban whoever wrote it, on your page itself: the link works for 12 hours, in the browser it opens in.</div></html>")));
-		notesLine.setForeground(LIME);
-		notesLine.setVisible(false);
-		moreTab.add(left(notesLine));
-		moreTab.add(Box.createVerticalStrut(6));
-		moreTab.add(wide(button("Read and tend my register", hooks::tendChat)));
-		tendStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		moreTab.add(left(tendStatus));
-		moreTab.add(Box.createVerticalStrut(12));
-		moreTab.add(wide(button("Take my page down", () ->
-		{
-			int sure = javax.swing.JOptionPane.showConfirmDialog(this,
-				"Take your Outside page down? Everything on it goes, and the name is free for anyone to claim."
-					, "Take my page down", javax.swing.JOptionPane.OK_CANCEL_OPTION,
-				javax.swing.JOptionPane.WARNING_MESSAGE);
-			if (sure == javax.swing.JOptionPane.OK_OPTION)
-			{
-				hooks.takeDown();
-			}
-		})));
-		tabs.addTab(new MaterialTab("More", tabs, moreTab));
 
 		tabs.select(first);
 		page.add(tabs);
