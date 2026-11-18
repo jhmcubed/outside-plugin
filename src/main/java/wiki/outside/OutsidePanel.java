@@ -58,6 +58,9 @@ public class OutsidePanel extends PluginPanel
 
 		void update();
 
+		/** "Set my goal item": the game's item search, the item picked goes to the page (update 3). */
+		void setGoal();
+
 		/** "Show what's sent": what "Update my page" would send now, in a window. */
 		void showSent();
 
@@ -180,6 +183,9 @@ public class OutsidePanel extends PluginPanel
 		page.add(wide(button("Open my page", hooks::openPage)));
 		page.add(Box.createVerticalStrut(4));
 		page.add(wide(button("Show what's sent", () -> hooks.showSent())));
+		// (the goal item, 11/17/2026: here, by the page's own buttons, so it's found without looking for it)
+		page.add(Box.createVerticalStrut(4));
+		page.add(wide(button("Set my goal item", hooks::setGoal)));
 		snapClock.start();
 		page.add(Box.createVerticalStrut(10));
 
@@ -349,8 +355,8 @@ public class OutsidePanel extends PluginPanel
 	{
 		SwingUtilities.invokeLater(() ->
 		{
-			boolean changed = !who.getText().equals(channel == null ? "no page yet" : "outside.wiki/" + channel);
-			who.setText(channel == null ? "no page yet" : "outside.wiki/" + channel);
+			boolean changed = !who.getText().equals(channel == null ? "no page yet" : "Outside.wiki/" + channel);
+			who.setText(channel == null ? "no page yet" : "Outside.wiki/" + channel);
 			start.setVisible(channel == null);
 			page.setVisible(channel != null);
 			if (changed)
@@ -373,7 +379,7 @@ public class OutsidePanel extends PluginPanel
 			friends = Boolean.TRUE.equals(friendsOnly);
 			access.setText("<html><div style='width:155px'>" + (friendsOnly == null ? "Anyone with the link, unless you've made it friends only."
 				: friends ? "Friends only: only those you give the friends' link to. It's off the globe and the feed."
-				: "Anyone with the link, and you show on outside.wiki's globe and feed while you play.") + "</div></html>");
+				: "Anyone with the link, and you show on Outside.wiki's globe and feed while you play.") + "</div></html>");
 			accessButton.setText(friends ? "Open it to anyone" : "Make it friends only");
 			infoAccess.setText(friendsOnly == null ? "…" : friends ? "friends only" : "anyone");
 			friendsLink.setVisible(friends);
@@ -409,7 +415,7 @@ public class OutsidePanel extends PluginPanel
 	{
 		SwingUtilities.invokeLater(() ->
 		{
-			otherLine.setText(theirs == null ? " " : "<html><div style='width:155px'>The station key in the plugin's settings is outside.wiki/" + esc(theirs)
+			otherLine.setText(theirs == null ? " " : "<html><div style='width:155px'>The station key in the plugin's settings is Outside.wiki/" + esc(theirs)
 				+ "'s, so nothing of " + esc(me) + "'s goes there. Make " + esc(me) + " a page of its own here.</div></html>");
 			otherLine.setVisible(theirs != null);
 			revalidate();

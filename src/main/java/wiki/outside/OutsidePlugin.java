@@ -93,7 +93,7 @@ import org.slf4j.LoggerFactory;
  */
 @PluginDescriptor(
 	name = "Outside",
-	description = "Your gear, stats, quests, diaries and slayer task on your own page at outside.wiki",
+	description = "Your gear, stats, quests, diaries and slayer task on your own page at Outside.wiki",
 	tags = {"outside", "loadout", "inventory", "profile", "quests", "diaries", "slayer", "discord"}
 )
 public class OutsidePlugin extends Plugin
@@ -129,6 +129,10 @@ public class OutsidePlugin extends Plugin
 
 	@Inject
 	private ItemManager itemManager;
+
+	// (the game's own item search in the chatbox, as the bank tags' icon picker: the goal item's, 11/17/2026)
+	@Inject
+	private net.runelite.client.game.chatbox.ChatboxItemSearch goalSearch;
 
 	@Inject
 	private ChatMessageManager chat;
@@ -310,6 +314,18 @@ public class OutsidePlugin extends Plugin
 			else
 			{
 				keep("model", null);
+			}
+		}
+		// (the goal: off, it's taken down; on, the one set goes again)
+		if (e.getKey().equals("goal"))
+		{
+			if (config.goal())
+			{
+				clientThread.invokeLater(() -> sendGoal(false));
+			}
+			else
+			{
+				keep("goal", null);
 			}
 		}
 		if (e.getKey().equals("bank") && !config.bank())
@@ -581,7 +597,7 @@ public class OutsidePlugin extends Plugin
 			}
 			JsonObject body = snapshotBody(System.currentTimeMillis(), false);
 			String text = gson.newBuilder().setPrettyPrinting().disableHtmlEscaping().create().toJson(body);
-			String to = a == null ? "your page, once it's made" : "outside.wiki/" + a.getChannel() + " (through " + HOME_RELAY.replaceAll("^https?://", "") + ")";
+			String to = a == null ? "your page, once it's made" : "Outside.wiki/" + a.getChannel() + " (through " + HOME_RELAY.replaceAll("^https?://", "") + ")";
 			panel.showSent(to, text, config.send());
 		});
 	}
@@ -1012,6 +1028,10 @@ public class OutsidePlugin extends Plugin
 		{
 			deathbankLine(Text.removeTags(e.getMessage()));
 		}
+		if ((e.getType() == ChatMessageType.GAMEMESSAGE || e.getType() == ChatMessageType.SPAM) && config.goal())
+		{
+			goalLine(clogAdded(Text.removeTags(e.getMessage())));
+		}
 		if (!config.charges() || (e.getType() != ChatMessageType.GAMEMESSAGE && e.getType() != ChatMessageType.SPAM))
 		{
 			return;
@@ -1090,6 +1110,19 @@ public class OutsidePlugin extends Plugin
 	@Subscribe
 	public void onCommandExecuted(CommandExecuted e)
 	{
+		// (::outsidegoal opens the item search for the goal; ::outsidegoal clear takes it off)
+		if ("outsidegoal".equalsIgnoreCase(e.getCommand()))
+		{
+			if (e.getArguments().length > 0 && "clear".equalsIgnoreCase(e.getArguments()[0]))
+			{
+				goalClear();
+			}
+			else
+			{
+				goalPick();
+			}
+			return;
+		}
 		if ("outsideforget".equalsIgnoreCase(e.getCommand()))
 		{
 			String name = motionName(e.getArguments());
@@ -1152,10 +1185,149 @@ public class OutsidePlugin extends Plugin
 		return im;
 	}
 
+	// ---- the goal item (Goal.java; 11/17/2026, update 3) ----
+
+	/** The game's item search in the chatbox, for the goal: as you type, only the items that match, a click sets it. */
+	private void goalPick()
+	{
+		clientThread.invokeLater(() ->
+		{
+			if (!config.goal())
+			{
+				say("switch on \"Goal item\" in the plugin's settings first");
+				return;
+			}
+			if (client.getGameState() != net.runelite.api.GameState.LOGGED_IN)
+			{
+				say("log in first: the goal is your account's own");
+				return;
+			}
+			goalSearch.tooltipText("Set as my Outside goal")
+				.onItemSelected(id -> clientThread.invokeLater(() -> goalChosen(id)))
+				.build();
+		});
+	}
+
+	/** An item chosen: kept for this account, sent with its model (on the client's thread). */
+	private void goalChosen(int id)
+	{
+		int item = itemManager.canonicalize(id);
+		configManager.setRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM, item);
+		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT);
+		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS);
+		sendGoal();
+		say("your goal is " + itemManager.getItemComposition(item).getName() + ": your Outside page shows it, your kill count and how dry you are");
+	}
+
+	private void goalClear()
+	{
+		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM);
+		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT);
+		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS);
+		keep("goal", null);
+		say("your goal's off your Outside page");
+	}
+
+	/** The goal set for this account to the keep: the item, its model as the game draws it (its own recolours and
+	 *  retextures), and when it was got with the counts then (on the client's thread). */
+	private void sendGoal()
+	{
+		sendGoal(false);
+	}
+
+	/** byItself: the game's collection log line sent it, not the player's press, so in the Hub's version it waits for the
+	 *  next update (Update my page, or the hourly one), as the bank does: the reviewer's terms, a press or the hourly sync. */
+	private void sendGoal(boolean byItself)
+	{
+		Integer item = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM, Integer.class);
+		if (!config.goal() || item == null || item <= 0)
+		{
+			return;
+		}
+		net.runelite.api.ItemComposition c = itemManager.getItemComposition(item);
+		JsonObject model = null;
+		try
+		{
+			net.runelite.api.ModelData md = client.loadModelData(c.getInventoryModel());
+			if (md != null)
+			{
+				md = md.cloneColors().cloneTextures();
+				short[] from = c.getColorToReplace(), to = c.getColorToReplaceWith();
+				for (int i = 0; from != null && to != null && i < Math.min(from.length, to.length); i++)
+				{
+					md.recolor(from[i], to[i]);
+				}
+				short[] tf = c.getTextureToReplace(), tt = c.getTextureToReplaceWith();
+				for (int i = 0; tf != null && tt != null && i < Math.min(tf.length, tt.length); i++)
+				{
+					md.retexture(tf[i], tt[i]);
+				}
+				Model m = md.light();
+				if (m != null)
+				{
+					model = wholeModel(modelJson(m), null, null, null);
+				}
+			}
+		}
+		catch (RuntimeException ex)
+		{
+			log.debug("outside: the goal's model", ex);
+		}
+		Long got = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT, Long.class);
+		String then = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS);
+		JsonObject countsThen = null;
+		try
+		{
+			countsThen = then == null ? null : gson.fromJson(then, JsonObject.class);
+		}
+		catch (RuntimeException ex)
+		{
+			countsThen = null;
+		}
+		JsonObject body = Goal.body(item, c.getName(), model, got == null ? 0 : got, countsThen);
+		if (byItself && HOLD_KEEPS)
+		{
+			synchronized (keepHeld)
+			{
+				keepHeld.put("goal", body);
+			}
+			return;
+		}
+		keep("goal", body);
+	}
+
+	/** The game's collection log line: the goal's, it's got (once), the counts then kept with it. */
+	private void goalLine(String added)
+	{
+		Integer item = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM, Integer.class);
+		if (added == null || item == null || item <= 0)
+		{
+			return;
+		}
+		if (configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT, Long.class) != null)
+		{
+			return;
+		}
+		if (!Goal.isIt(added, itemManager.getItemComposition(item).getName()))
+		{
+			return;
+		}
+		configManager.setRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT, System.currentTimeMillis());
+		configManager.setRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS, gson.toJson(counts.json()));
+		sendGoal(true);
+		say(HOLD_KEEPS ? "your goal's got: your Outside page says so with your next update" : "your goal's got: your Outside page says so");
+	}
+
 	private OutsidePanel.Hooks panelHooks()
 	{
 		return new OutsidePanel.Hooks()
 		{
+			@Override
+			public void setGoal()
+			{
+				goalPick();
+			}
+
 			@Override
 			public void capture(String name)
 			{
@@ -1628,7 +1800,7 @@ public class OutsidePlugin extends Plugin
 						configManager.unsetConfiguration(OutsideConfig.GROUP, "stationKey");
 					}
 					syncDue = true;
-					say("your Outside page moved to outside.wiki/" + name + " (your name as the game has it)");
+					say("your Outside page moved to Outside.wiki/" + name + " (your name as the game has it)");
 					http.newCall(new Request.Builder().url(old.takeDownUrl()).header("User-Agent", "outside-plugin/" + VERSION)
 						.delete().build()).enqueue(new Callback()
 					{
@@ -1696,20 +1868,20 @@ public class OutsidePlugin extends Plugin
 						if (back)
 						{
 							// (taking a name back: someone else claimed it first and hasn't proven it)
-							panel.claiming(false, "outside.wiki/" + name + " was claimed by someone who hasn't proven it. Gain any experience,"
+							panel.claiming(false, "Outside.wiki/" + name + " was claimed by someone who hasn't proven it. Gain any experience,"
 								+ " press Update my page, wait a minute, then log out: when the official hiscores show it, the page is yours.");
-							say("you're taking back outside.wiki/" + name + ": gain any experience, press Update my page, wait a minute, then log out");
+							say("you're taking back Outside.wiki/" + name + ": gain any experience, press Update my page, wait a minute, then log out");
 						}
 						else
 						{
-							panel.claiming(false, "your page: outside.wiki/" + name + " (marked unproven till it's proven yours)");
-							say("your Outside page is made: outside.wiki/" + name);
+							panel.claiming(false, "your page: Outside.wiki/" + name + " (marked unproven till it's proven yours)");
+							say("your Outside page is made: Outside.wiki/" + name);
 						}
 						return;
 					}
 					if (res.code() == 409)
 					{
-						panel.claiming(false, "outside.wiki/" + name + " is proven or vouched for already. If it's yours, paste its station key in the plugin's settings.");
+						panel.claiming(false, "Outside.wiki/" + name + " is proven or vouched for already. If it's yours, paste its station key in the plugin's settings.");
 						return;
 					}
 					String why = o != null && o.has("error") ? o.get("error").getAsString() : "the relay said " + res.code();

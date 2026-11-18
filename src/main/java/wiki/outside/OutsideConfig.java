@@ -18,7 +18,7 @@ public interface OutsideConfig extends Config
 	@ConfigSection(name = "On your page", description = "What goes on your page, each its own switch", position = 1)
 	String shownSection = "shown";
 
-	@ConfigSection(name = "What you're doing", description = "What your page and outside.wiki's globe say you're doing", position = 2)
+	@ConfigSection(name = "What you're doing", description = "What your page and Outside.wiki's globe say you're doing", position = 2)
 	String doingSection = "doing";
 
 	@ConfigSection(name = "Advanced", description = "Your page's key, if you were given one", position = 9, closedByDefault = true)
@@ -112,7 +112,7 @@ public interface OutsideConfig extends Config
 		name = "What I'm doing",
 		description = "The skill you're training and the area you're in by name (a city, a dungeon, a boss, a raid, a minigame"
 			+ " or a region), as RuneLite's own Discord plugin shows them: sent as they change (once a minute at most) and with"
-			+ " each update. Your page shows it, and outside.wiki's globe lights you in that area. Never your tile or your"
+			+ " each update. Your page shows it, and Outside.wiki's globe lights you in that area. Never your tile or your"
 			+ " world, and nothing from the Wilderness or a PvP world.",
 		position = 0,
 		section = doingSection
@@ -213,6 +213,23 @@ public interface OutsideConfig extends Config
 		hidden = true
 	)
 	default boolean ground()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "goal",
+		name = "Goal item",
+		description = "On (to begin with): the item you're after (\"Set my goal item\" in the side tab, or ::outsidegoal) goes"
+			+ " to your Outside page with its 3D model, and the page shows your kill count and how dry you are for it."
+			+ " When the game's collection log says you got it, the page says so. ::outsidegoal clear takes it off",
+		warning = "On, the item you set as your goal (its name and its 3D model) and, when you get it, your kill and clue"
+			+ " counts then go to the Outside relay, a server not controlled or verified by the RuneLite developers, and"
+			+ " your Outside page shows them to anyone who opens it.",
+		position = 10,
+		section = shownSection
+	)
+	default boolean goal()
 	{
 		return true;
 	}
