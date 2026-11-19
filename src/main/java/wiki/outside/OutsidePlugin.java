@@ -1393,14 +1393,17 @@ public class OutsidePlugin extends Plugin
 		}
 	}
 
+	// (RuneLite's event bus takes a listener only when it's named "on" and its event's name: anything else and the plugin
+	// won't start. 11/19/2026: update 4 named these goalOnNpcLoot and goalOnLoot, to keep clear of the field reports'
+	// own listener, and the Hub's version wouldn't switch on. One listener now, which hands the reports theirs.)
 	@Subscribe
-	public void goalOnNpcLoot(net.runelite.client.events.NpcLootReceived e)
+	public void onNpcLootReceived(net.runelite.client.events.NpcLootReceived e)
 	{
 		goalLoot(e.getItems());
 	}
 
 	@Subscribe
-	public void goalOnLoot(net.runelite.client.plugins.loottracker.LootReceived e)
+	public void onLootReceived(net.runelite.client.plugins.loottracker.LootReceived e)
 	{
 		goalLoot(e.getItems());
 	}
@@ -2241,8 +2244,8 @@ public class OutsidePlugin extends Plugin
 		return s;
 	}
 
-	/** One effect on them now: its key (id, vertices, faces), its vertices (at its height, as RuneLite has them), and
-	 *  its model as JSON unless it's one already known. */
+	/** One effect on them now: its key (id, vertices, faces), its vertices (raised by its height), and its model as
+	 *  JSON unless it's one already known. */
 	private static final class Fx
 	{
 		String key;
@@ -2275,10 +2278,10 @@ public class OutsidePlugin extends Plugin
 			f.x = java.util.Arrays.copyOf(m.getVerticesX(), f.n);
 			f.y = java.util.Arrays.copyOf(m.getVerticesY(), f.n);
 			f.z = java.util.Arrays.copyOf(m.getVerticesZ(), f.n);
-			// (11/19/2026: taken as RuneLite hands it over, already at its height. Raised again by sa.getHeight(), every
-			// effect sat one height too high: a friend's arrow drawn from his bow came out 96 over it, at the top of his
-			// head (Jace: "my friends SalutCFlagg's arrow its flying above his bow, make it look right"), and Ja's
-			// casting at 308, over his head, not at his chest)
+			for (int i = 0; i < f.n; i++)
+			{
+				f.y[i] -= sa.getHeight();
+			}
 			if (known == null || !known.contains(f.key))
 			{
 				f.json = Kept.model(f.x, f.y, f.z, f.n, m.getFaceIndices1(), m.getFaceIndices2(), m.getFaceIndices3(), m.getFaceCount(),
