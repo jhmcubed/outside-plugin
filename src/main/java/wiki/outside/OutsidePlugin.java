@@ -1309,7 +1309,7 @@ public class OutsidePlugin extends Plugin
 		goalPanel(k);
 		say(k.list.size() == 1
 			? "your goal is " + name + ": your Outside page shows it, your kill count and how dry you are"
-			: name + " is added to your goals: your Outside page lists it under " + itemName(k.shown) + ", with your kill count and how dry you are");
+			: name + " is added to your goals: your Outside page lists it" + (k.model ? " under " + itemName(k.shown) : "") + ", with your kill count and how dry you are");
 	}
 
 	/** The one shown as its 3D model on the page (the side tab's choice; on the client's thread). */
@@ -1317,6 +1317,19 @@ public class OutsidePlugin extends Plugin
 	{
 		Goal.Kept k = goals();
 		if (!k.show(id))
+		{
+			return;
+		}
+		goalsKeep(k);
+		sendGoalSoon();
+		goalPanel(k);
+	}
+
+	/** None shown as a model: every goal listed with its picture (the side tab's "No 3D model"; on the client's thread). */
+	private void goalNoModel()
+	{
+		Goal.Kept k = goals();
+		if (!k.noModel())
 		{
 			return;
 		}
@@ -1363,9 +1376,9 @@ public class OutsidePlugin extends Plugin
 		List<OutsidePanel.GoalRow> rows = new ArrayList<>();
 		for (Goal.One g : k.list)
 		{
-			rows.add(new OutsidePanel.GoalRow(g.id, itemName(g.id), g.got > 0, g.id == k.shown));
+			rows.add(new OutsidePanel.GoalRow(g.id, itemName(g.id), g.got > 0, k.model && g.id == k.shown));
 		}
-		panel.goals(rows, Goal.MOST);
+		panel.goals(rows, Goal.MOST, k.model);
 	}
 
 	/** Every goal taken off (::outsidegoal clear). */
@@ -1418,7 +1431,7 @@ public class OutsidePlugin extends Plugin
 		for (Goal.One g : k.pageOrder())
 		{
 			net.runelite.api.ItemComposition c = itemManager.getItemComposition(g.id);
-			JsonObject model = shown == null ? goalModel(c) : null;
+			JsonObject model = shown == null && k.model ? goalModel(c) : null;
 			JsonObject one = Goal.body(g.id, c.getName(), model, g.got, g.counts);
 			if (shown == null)
 			{
@@ -1618,6 +1631,12 @@ public class OutsidePlugin extends Plugin
 			public void forgetGoal(int id)
 			{
 				clientThread.invokeLater(() -> goalForget(id));
+			}
+
+			@Override
+			public void noGoalModel()
+			{
+				clientThread.invokeLater(() -> goalNoModel());
 			}
 
 			@Override
