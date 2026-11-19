@@ -709,6 +709,7 @@ public class OutsidePlugin extends Plugin
 					}
 					else if (code == 200 && res.body() != null)
 					{
+						keepKey(a);
 						// (what the page's proof did with it, while it's still to be made: docs/protocol.md "Proving a name")
 						try
 						{
@@ -1565,6 +1566,26 @@ public class OutsidePlugin extends Plugin
 			}
 
 			@Override
+			public void copyKey()
+			{
+				Attach a = key();
+				if (a == null)
+				{
+					panel.keyStatus("no key for this character yet");
+					return;
+				}
+				try
+				{
+					java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new java.awt.datatransfer.StringSelection(stationKey().trim()), null);
+					panel.keyStatus("copied: on your other computer, paste it in Outside's settings (Advanced, Station key)");
+				}
+				catch (IllegalStateException | java.awt.HeadlessException ex)
+				{
+					panel.keyStatus("the clipboard's busy: try again");
+				}
+			}
+
+			@Override
 			public void update()
 			{
 				updateNow();
@@ -1836,6 +1857,25 @@ public class OutsidePlugin extends Plugin
 		return own != null && !own.trim().isEmpty() ? own : pasted;
 	}
 
+	/** A pasted key the relay's just taken kept with the account too (11/19/2026: Jace's key, pasted from his outstation,
+	 *  was only in the settings, and his PC's copy went missing, likely RuneLite's cloud sync between his two computers;
+	 *  the one kept with the account is a second copy, which RuneLite's settings Reset doesn't touch either). */
+	private void keepKey(Attach taken)
+	{
+		String pasted = config.stationKey();
+		Attach p = pasted == null ? null : Attach.parse(pasted, gson);
+		if (p == null || taken == null || !p.getChannel().equals(taken.getChannel()) || !p.getKey().equals(taken.getKey())
+			|| character == null || !isOwn(p.getChannel(), character))
+		{
+			return;
+		}
+		String own = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "stationKey");
+		if (!pasted.trim().equals(own == null ? "" : own.trim()))
+		{
+			configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "stationKey", pasted.trim());
+		}
+	}
+
 	/** The key read, or null: none, or one whose page isn't the character logged in (another account's). */
 	private Attach key()
 	{
@@ -2024,7 +2064,10 @@ public class OutsidePlugin extends Plugin
 					}
 					if (res.code() == 409)
 					{
-						panel.claiming(false, "Outside.wiki/" + name + " is proven or vouched for already. If it's yours, paste its station key in the plugin's settings.");
+						// (11/19/2026: where its key is, Jace's PC having lost his: on the computer that shows the page, or the outstation)
+						panel.claiming(false, "Outside.wiki/" + name + " is proven or vouched for already. If it's yours, copy its key on a"
+							+ " computer where Outside shows your page (the Page tab's Copy my station key) and paste it in this plugin's"
+							+ " settings (Advanced, Station key).");
 						return;
 					}
 					String why = o != null && o.has("error") ? o.get("error").getAsString() : "the relay said " + res.code();

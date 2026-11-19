@@ -59,6 +59,9 @@ public class OutsidePanel extends PluginPanel
 
 		void claim();
 
+		/** "Copy my station key": the page's key, for the outstation or Outside on another computer. */
+		void copyKey();
+
 		void update();
 
 		/** "Set my goal item": the game's item search, the item picked goes to the page (update 3). */
@@ -117,6 +120,8 @@ public class OutsidePanel extends PluginPanel
 	private final JLabel infoAccess = small("…");
 	private final JLabel infoUpdated = small("not this session");
 	private final JLabel otherLine = small(" ");
+	// (in the Hub's version too since 11/19/2026: a player's key for their other computers)
+	private final JLabel keyStatus = small(" ");
 	// (11/16/2026, the snapshot: "Update my page", when it was last updated from here, and what the last press did)
 	private final JLabel snapStatus = small(" ");
 	private long snapAt;
@@ -165,6 +170,8 @@ public class OutsidePanel extends PluginPanel
 		start.add(wide(claim));
 		claimStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		start.add(left(claimStatus));
+		start.add(left(small("<html><div style='width:155px'>Have a page already, made on another computer? There,"
+			+ " the Page tab's Copy my station key; then paste it here in the plugin's settings (Advanced, Station key).</div></html>")));
 		start.add(Box.createVerticalStrut(10));
 		start.setVisible(false);
 		col.add(start);
@@ -278,6 +285,17 @@ public class OutsidePanel extends PluginPanel
 			+ " lets you in under your own name.</div></html>")));
 		pageTab.add(Box.createVerticalStrut(6));
 		pageTab.add(wide(button("Talk in the aether as me", hooks::aetherAsMe)));
+		pageTab.add(Box.createVerticalStrut(12));
+		// (11/19/2026, Jace: a player with only the plugin needs their key too, for Outside on another computer: his Mac had
+		// none, and his PC's went missing; the Hub's version had no way to show it)
+		pageTab.add(left(heading("Your page's key")));
+		pageTab.add(left(small("<html><div style='width:155px'>For Outside on another computer: copy it here, then paste"
+			+ " it there in the plugin's settings, Advanced, Station key. Keep it to yourself: whoever has it can change your"
+			+ " page.</div></html>")));
+		pageTab.add(Box.createVerticalStrut(6));
+		pageTab.add(wide(button("Copy my station key", hooks::copyKey)));
+		keyStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		pageTab.add(left(keyStatus));
 		pageTab.add(Box.createVerticalStrut(12));
 		pageTab.add(wide(button("Take my page down", () ->
 		{
@@ -458,6 +476,12 @@ public class OutsidePanel extends PluginPanel
 	public void tendStatus(String words)
 	{
 		SwingUtilities.invokeLater(() -> tendStatus.setText(words == null ? " " : "<html><div style='width:155px'>" + esc(words) + "</div></html>"));
+	}
+
+	/** A line under "Copy my station key". */
+	public void keyStatus(String words)
+	{
+		SwingUtilities.invokeLater(() -> keyStatus.setText(words == null ? " " : "<html><div style='width:155px'>" + esc(words) + "</div></html>"));
 	}
 
 	/** When the key in the settings is another character's (its page), and who's logged in: said under the button. */
