@@ -29,6 +29,8 @@ import net.runelite.client.ui.components.materialtabs.MaterialTabGroup;
  * <li>"Update my page" and when it was last updated (11/16/2026, the snapshot);</li>
  * <li>capturing the character (the next emote done within 8 seconds, else them and their pet standing), the motions
  * on their page, which one it shows first, taking one away, and taking their model off their page;</li>
+ * <li>their encounters (11/21/2026): recording on or off, one by hand, and the recent ones, each put on their page or
+ * not, shown to anyone or kept to themselves, or deleted;</li>
  * </ul>
  * Everything it does goes through the plugin (OutsidePlugin's panel hooks); this only draws.
  */
@@ -57,6 +59,10 @@ public class OutsidePanel extends PluginPanel
 
 		void openPage();
 
+		/** "Edit my page" (11/21/2026, update 6): the page opened with a link that can arrange it and set its theme song,
+		 *  and nothing else, for 2 hours. */
+		void editPage();
+
 		void claim();
 
 		/** "Copy my station key": the page's key, for the outstation or Outside on another computer. */
@@ -64,11 +70,18 @@ public class OutsidePanel extends PluginPanel
 
 		void update();
 
-		/** "Set my goal item": the game's item search, the item picked goes to the page (update 3). */
-		void setGoal();
+		/** "Add a goal item": the game's item search, the item picked added to the goals on the page (update 3; a list
+		 *  since 11/19/2026). */
+		void addGoal();
 
-		/** The ✕ beside the goal: taken off the page (update 4). */
-		void clearGoal();
+		/** The goal picked beside the others: the one shown as its 3D model on the page (11/19/2026). */
+		void showGoal(int id);
+
+		/** The ✕ beside a goal: taken off the page (update 4). */
+		void forgetGoal(int id);
+
+		/** "No 3D model": every goal listed on the page with its picture, none turning (11/19/2026). */
+		void noGoalModel();
 
 		/** "Show what's sent": what "Update my page" would send now, in a window. */
 		void showSent();
@@ -87,6 +100,46 @@ public class OutsidePanel extends PluginPanel
 
 		void tendChat();
 
+		/** "Record my encounters" (the setting): whether it's on, and switching it. */
+		boolean recordingOn();
+
+		void setRecordingOn(boolean on);
+
+		/** "Record now", or "Stop" while one's running. */
+		void recordToggle();
+
+		/** The Encounters tab opened, or its Refresh: the list read again, and the page's own (what's on it, and whether
+		 *  the page takes encounters at all): the one request this tab makes by itself, on the press that opens it. */
+		void encountersShown();
+
+		/** "Put on my page": the recording stripped, what was taken out said, and sent once that's agreed to. */
+		void putFight(String file, boolean shown);
+
+		/** "Shown to anyone" ticked or not: on the page at once if it's there, else the choice for when it goes. */
+		void fightShown(String file, boolean shown);
+
+		/** "Open": its page on Outside.wiki, outside.wiki/<name>/fight/<id>. */
+		void openFight(String file);
+
+		/** "Put each encounter on my page" (the setting, 11/21/2026): whether it's on, and switching it. */
+		boolean sendingOn();
+
+		void setSendingOn(boolean on);
+
+		/** "keep for good" ticked or not: kept on the page past its days (at most the relay's twelve), or let go. */
+		void keepFight(String file, boolean keep);
+
+		/** "✼ feature it": the page's featured encounter, its stage (and kept for good). */
+		void featureFight(String file);
+
+		/** "take down": off the page (the file stays on this computer). */
+		void takeDownFight(String file);
+
+		/** The ✕: the recording's file deleted from this computer (one on the page stays there). */
+		void deleteEncounter(String file);
+
+		/** "Copy the folder's place": where the recordings are, for a file manager. */
+		void copyEncountersFolder();
 	}
 
 	/** a motion on their page, as the relay lists it */
@@ -141,6 +194,27 @@ public class OutsidePanel extends PluginPanel
 	private boolean friends;
 	// (11/16/2026: the page's chat tended on the page, with the plugin alone)
 	private final JLabel tendStatus = small(" ");
+	// (11/21/2026, update 6: the page arranged, and its theme song set, on the page)
+	private final JLabel editStatus = small(" ");
+	private final javax.swing.JCheckBox recordOn = new javax.swing.JCheckBox("Record my encounters");
+	private final javax.swing.JCheckBox sendOn = new javax.swing.JCheckBox("Put each on my page");
+	private final JLabel keptLine = small(" ");
+	/** how many are kept for good on the page, and how many may be (the relay's FIGHTS_KEPT) */
+	private int fightsKept, fightsKeptMost = 12;
+	private boolean wasRecording;
+	private final JButton recordNow = new JButton("Record now");
+	private final JLabel recordLine = small(" ");
+	private final JLabel fightsOff = small(" ");
+	private final JLabel fightStatus = small(" ");
+	private final JPanel fightList = new JPanel();
+	/** whether the page takes encounters (null: not read yet), and whether a new one starts shown to anyone */
+	private Boolean fightsOn;
+	private boolean fightsShownFirst;
+	/** the rows as last listed, the character logged in, and the rows whose put is under way */
+	private List<EncounterShelf.Row> fightRows;
+	private int fightMore;
+	private String fightMe;
+	private final java.util.Set<String> putting = new java.util.HashSet<>();
 
 	public OutsidePanel(Hooks hooks)
 	{
@@ -196,7 +270,18 @@ public class OutsidePanel extends PluginPanel
 		snapStatus.setVisible(false);
 		page.add(left(snapStatus));
 		page.add(Box.createVerticalStrut(4));
-		page.add(wide(button("Open my page", hooks::openPage)));
+		// (11/21/2026, update 6; Jace, of editing his own page and adding a song: "Build it, they should be a part of update
+		// 6"): Edit my page beside Open my page, the page opened to arrange it and set its theme song
+		JPanel openRow = new JPanel(new GridLayout(1, 0, 4, 0));
+		openRow.add(button("Open my page", hooks::openPage));
+		JButton editButton = button("Edit my page", hooks::editPage);
+		editButton.setToolTipText("Open your page to arrange it and set its theme song (the link works for 2 hours)");
+		openRow.add(editButton);
+		openRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+		page.add(openRow);
+		editStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		editStatus.setVisible(false);
+		page.add(left(editStatus));
 		page.add(Box.createVerticalStrut(4));
 		page.add(wide(button("Show what's sent", () -> hooks.showSent())));
 		snapClock.start();
@@ -214,30 +299,21 @@ public class OutsidePanel extends PluginPanel
 			+ " every hour you're logged in; never from the Wilderness or a PvP world. What goes on it is in the plugin's"
 			+ " settings, each part its own switch.</div></html>")));
 		// (the goal item, 11/17/2026; in the Page tab since 11/18/2026, update 4, Jace: set once and left, not one of
-		// the buttons pressed every session, which stay above)
+		// the buttons pressed every session, which stay above. A list since 11/19/2026, Cranky: "maybe the button would
+		// be 'add a goal item' and it would just add to the list, and you'd just have to x any you don't want anymore";
+		// Jace: one of them shown as its 3D model, the rest listed under it)
 		pageTab.add(Box.createVerticalStrut(12));
-		pageTab.add(left(heading("Your goal")));
-		pageTab.add(left(small("<html><div style='width:155px'>An item you're after: your page shows its 3D model, your kill"
-			+ " count where it drops and how dry you are for it.</div></html>")));
+		pageTab.add(left(heading("Your goals")));
+		pageTab.add(left(small("<html><div style='width:155px'>Items you're after: your page shows your kill count where each"
+			+ " drops and how dry you are for it, and the one picked here as its 3D model (or none).</div></html>")));
 		pageTab.add(Box.createVerticalStrut(6));
-		pageTab.add(wide(button("Set my goal item", hooks::setGoal)));
-		// (the goal set, with ✕ to take it off: 11/18/2026, update 4; ::outsidegoal clear was the only way)
-		JPanel goalRow = new JPanel(new BorderLayout(6, 0));
-		goalRow.setOpaque(false);
-		goalLine.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		goalRow.add(goalLine, BorderLayout.CENTER);
-		goalClear.setToolTipText("Take the goal off your page");
-		// (the game's own font has no ✕: a system font's, or × or x where that has none either)
-		goalClear.setFont(new java.awt.Font(java.awt.Font.DIALOG, java.awt.Font.PLAIN, 12));
-		goalClear.setText(goalClear.getFont().canDisplay('\u2715') ? "\u2715" : goalClear.getFont().canDisplay('\u00d7') ? "\u00d7" : "x");
-		goalClear.setMargin(new java.awt.Insets(0, 6, 0, 6));
-		goalClear.addActionListener(ev -> hooks.clearGoal());
-		goalRow.add(goalClear, BorderLayout.EAST);
-		goalRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 24));
-		goalRow.setVisible(false);
-		goalBox = goalRow;
+		goalAdd.addActionListener(ev -> hooks.addGoal());
+		pageTab.add(wide(goalAdd));
+		goalList.setLayout(new BoxLayout(goalList, BoxLayout.Y_AXIS));
+		goalList.setOpaque(false);
+		goalList.setVisible(false);
 		pageTab.add(Box.createVerticalStrut(4));
-		pageTab.add(goalRow);
+		pageTab.add(goalList);
 		pageTab.add(Box.createVerticalStrut(12));
 		// (the More tab's parts, folded into the Page tab 11/18/2026, update 4, Jace: all of them are about the page;
 		// in his order: who sees it, Dink, the register, then taking it down last, on its own)
@@ -376,8 +452,81 @@ public class OutsidePanel extends PluginPanel
 		charTab.add(wide(button("Take my model off my page", hooks::removeModel)));
 		tabs.addTab(new MaterialTab("Model", tabs, charTab));
 
+		// (11/21/2026, ghillie's claude/outstation.md, "Encounters on Outside: the night's design": a third tab, beside
+		// Page and Model: recording at the top, then the recent ones, newest first)
+		JPanel fightTab = tab();
+		fightTab.add(left(small("<html><div style='width:155px'>Your fights at bosses and raids, recorded to this computer tick"
+			+ " by tick, from the start to the kill, your death or your leaving. With Put each on my page, each goes to your"
+			+ " page as it ends, with a moment of its scene; other players' names taken out first.</div></html>")));
+		fightTab.add(Box.createVerticalStrut(6));
+		recordOn.setSelected(hooks.recordingOn());
+		recordOn.setToolTipText("<html><div style='width:220px'>On, a recording starts by itself at a boss or a raid, never in"
+			+ " the Wilderness or PvP. Also in the plugin's settings, Encounters.</div></html>");
+		recordOn.addActionListener(e -> hooks.setRecordingOn(recordOn.isSelected()));
+		JPanel onRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
+		onRow.add(recordOn);
+		onRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+		fightTab.add(onRow);
+		// (11/21/2026, round two: every encounter up by itself, Jace's ask; the Hub's warning in its tip)
+		sendOn.setSelected(hooks.sendingOn());
+		sendOn.setToolTipText("<html><div style='width:220px'>On, each encounter goes to your Outside page as it ends, with"
+			+ " its scene moment: other players' names, their chat and your exact experience taken out first, then sent to the"
+			+ " Outside relay, a server not controlled or verified by the RuneLite developers. Off, only when you press Put on"
+			+ " my page. Also in the plugin's settings.</div></html>");
+		sendOn.addActionListener(e -> hooks.setSendingOn(sendOn.isSelected()));
+		JPanel sendRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
+		sendRow.add(sendOn);
+		sendRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+		fightTab.add(sendRow);
+		recordNow.addActionListener(e -> hooks.recordToggle());
+		fightTab.add(wide(recordNow));
+		recordLine.setForeground(LIME);
+		recordLine.setVisible(false);
+		fightTab.add(left(recordLine));
+		fightTab.add(Box.createVerticalStrut(12));
+		JPanel fightHead = new JPanel(new BorderLayout());
+		fightHead.add(heading("Recent encounters"), BorderLayout.WEST);
+		JButton fightAgain = new JButton("Refresh");
+		fightAgain.setToolTipText("read the list again, and what's on your page");
+		fightAgain.addActionListener(e -> hooks.encountersShown());
+		fightHead.add(fightAgain, BorderLayout.EAST);
+		fightHead.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
+		fightTab.add(fightHead);
+		fightsOff.setForeground(new Color(0xff, 0x69, 0xb4));
+		fightsOff.setVisible(false);
+		fightTab.add(left(fightsOff));
+		keptLine.setVisible(false);
+		fightTab.add(left(keptLine));
+		fightStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		fightStatus.setVisible(false);
+		fightTab.add(left(fightStatus));
+		fightList.setLayout(new BoxLayout(fightList, BoxLayout.Y_AXIS));
+		fightList.add(left(small("(not read yet)")));
+		fightTab.add(fightList);
+		fightTab.add(Box.createVerticalStrut(8));
+		fightTab.add(wide(button("Copy the folder's place", hooks::copyEncountersFolder)));
+		MaterialTab fightsTab = new MaterialTab("Encounters", tabs, fightTab);
+		fightsTab.setOnSelectEvent(() ->
+		{
+			hooks.encountersShown();
+			return true;
+		});
+		tabs.addTab(fightsTab);
+
 		// more: Dink, who sees it, the page's chat, and taking the page down (last, as it can't be undone)
 
+		// (11/21/2026: each tab as wide as its name needs and the rest shared out by that, where they were thirds:
+		// "Encounters" is wider than a third, less a tab's own sides)
+		java.awt.GridBagLayout bag = new java.awt.GridBagLayout();
+		tabs.setLayout(bag);
+		for (java.awt.Component c : tabs.getComponents())
+		{
+			java.awt.GridBagConstraints g = new java.awt.GridBagConstraints();
+			g.fill = java.awt.GridBagConstraints.HORIZONTAL;
+			g.weightx = c.getPreferredSize().width;
+			g.insets = new java.awt.Insets(0, 2, 0, 2);
+			bag.setConstraints(c, g);
+		}
 		tabs.select(first);
 		page.add(tabs);
 		page.add(Box.createVerticalStrut(8));
@@ -468,6 +617,17 @@ public class OutsidePanel extends PluginPanel
 		{
 			notesLine.setText(n == 1 ? "1 new note" : n + " new notes");
 			notesLine.setVisible(n > 0);
+			revalidate();
+		});
+	}
+
+	/** A line under "Edit my page" (none: hidden). */
+	public void editStatus(String words)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			editStatus.setText(words == null ? " " : "<html><div style='width:155px'>" + esc(words) + "</div></html>");
+			editStatus.setVisible(words != null);
 			revalidate();
 		});
 	}
@@ -629,21 +789,422 @@ public class OutsidePanel extends PluginPanel
 		});
 	}
 
-	private final JLabel goalLine = small(" ");
-	private final JButton goalClear = new JButton("x");
-	private JPanel goalBox;
+	private final JButton goalAdd = new JButton("Add a goal item");
+	private final JPanel goalList = new JPanel();
 
-	/** The goal under its button: its name and how it stands (null: none set, the line hidden). */
-	public void goal(String words)
+	/** A goal as the side tab lists it: the item, its name, whether it's got, and whether it's the one shown. */
+	public static final class GoalRow
+	{
+		final int id;
+		final String name;
+		final boolean got, shown;
+
+		public GoalRow(int id, String name, boolean got, boolean shown)
+		{
+			this.id = id;
+			this.name = name;
+			this.got = got;
+			this.shown = shown;
+		}
+	}
+
+	/** The goals under their button, in the order they were added: each picked to be shown, or taken off with its ✕
+	 *  (none: the list hidden); over them, "No 3D model", picked when none's shown as one. Full, the button waits. */
+	public void goals(List<GoalRow> rows, int most, boolean model)
 	{
 		SwingUtilities.invokeLater(() ->
 		{
-			if (goalBox == null)
+			goalList.removeAll();
+			ButtonGroup group = new ButtonGroup();
+			if (!rows.isEmpty())
 			{
-				return;
+				// (11/19/2026, Jace: "add the option to NOT show a 3D model on your page for your goal/goals list")
+				JPanel r = new JPanel(new BorderLayout(4, 0));
+				r.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+				r.setBorder(BorderFactory.createEmptyBorder(3, 4, 3, 4));
+				JRadioButton none = new JRadioButton("No 3D model", !model);
+				none.setToolTipText("Your page lists every goal with its picture, none turning as a 3D model");
+				none.setOpaque(false);
+				none.setFont(FontManager.getRunescapeSmallFont());
+				group.add(none);
+				none.addActionListener(e -> hooks.noGoalModel());
+				r.add(none, BorderLayout.CENTER);
+				r.setMaximumSize(new Dimension(Integer.MAX_VALUE, r.getPreferredSize().height));
+				goalList.add(r);
+				goalList.add(Box.createVerticalStrut(2));
 			}
-			goalBox.setVisible(words != null);
-			goalLine.setText(words == null ? " " : "<html><div style='width:130px'>" + esc(words) + "</div></html>");
+			for (GoalRow g : rows)
+			{
+				goalList.add(goalRow(g, group, rows.size() > 1));
+				goalList.add(Box.createVerticalStrut(2));
+			}
+			goalList.setVisible(!rows.isEmpty());
+			boolean full = rows.size() >= most;
+			goalAdd.setEnabled(!full);
+			goalAdd.setToolTipText(full ? most + " goals is the most: take one off first" : "The game's item search: the item you pick is added to your goals");
+			goalList.revalidate();
+			goalList.repaint();
+		});
+	}
+
+	private JPanel goalRow(GoalRow g, ButtonGroup group, boolean choice)
+	{
+		JPanel r = new JPanel(new BorderLayout(4, 0));
+		r.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		r.setBorder(BorderFactory.createEmptyBorder(3, 4, 3, 4));
+		JRadioButton pick = new JRadioButton("<html><div style='width:110px'>" + esc(g.name + (g.got ? " (got)" : "")) + "</div></html>", g.shown);
+		pick.setToolTipText(choice ? (g.shown ? "Shown as its 3D model on your page" : "Show this one as its 3D model on your page, the others listed under it")
+			: "Shown as its 3D model on your page");
+		pick.setOpaque(false);
+		pick.setFont(FontManager.getRunescapeSmallFont());
+		group.add(pick);
+		pick.addActionListener(e -> hooks.showGoal(g.id));
+		r.add(pick, BorderLayout.CENTER);
+		JButton x = new JButton();
+		// (the game's own font has no ✕: a system font's, or × or x where that has none either)
+		x.setFont(new java.awt.Font(java.awt.Font.DIALOG, java.awt.Font.PLAIN, 12));
+		x.setText(x.getFont().canDisplay('\u2715') ? "\u2715" : x.getFont().canDisplay('\u00d7') ? "\u00d7" : "x");
+		x.setMargin(new java.awt.Insets(0, 6, 0, 6));
+		x.setToolTipText("Take " + g.name + " off your goals");
+		x.addActionListener(ev -> hooks.forgetGoal(g.id));
+		r.add(x, BorderLayout.EAST);
+		r.setMaximumSize(new Dimension(Integer.MAX_VALUE, r.getPreferredSize().height));
+		return r;
+	}
+
+	/** The recording running (its words: what, how long, how big), or none: the button says Stop or Record now. */
+	public void encounterRecording(String words, boolean running)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			recordNow.setText(running ? "Stop" : "Record now");
+			if (running && !wasRecording)
+			{
+				// (a recording begun: what the last press said is past; not with each of its updates, 11/21/2026, or a
+				// keep's refusal went before it could be read)
+				fightStatus.setText(" ");
+				fightStatus.setVisible(false);
+			}
+			wasRecording = running;
+			recordLine.setText(words == null ? " " : "<html><div style='width:155px'>recording: " + esc(words) + "</div></html>");
+			recordLine.setVisible(running && words != null);
+			revalidate();
+		});
+	}
+
+	/** "Record my encounters" switched in the settings: the box follows. */
+	public void recordingOn(boolean on)
+	{
+		SwingUtilities.invokeLater(() -> recordOn.setSelected(on));
+	}
+
+	/** "Put each encounter on my page" switched in the settings: the box follows. */
+	public void sendingOn(boolean on)
+	{
+		SwingUtilities.invokeLater(() -> sendOn.setSelected(on));
+	}
+
+	/** Whether the page takes encounters (the relay's answer: false its fights are off, null not read yet), and whether
+	 *  a new one starts shown to anyone there. */
+	public void fightsState(Boolean on, boolean shownFirst, int kept, int keptMost)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			fightsOn = on;
+			fightsShownFirst = shownFirst;
+			fightsKept = kept;
+			fightsKeptMost = keptMost;
+			keptLine.setText(kept + " of " + keptMost + " kept for good on your page");
+			keptLine.setForeground(kept >= keptMost ? new Color(0xff, 0x69, 0xb4) : ColorScheme.LIGHT_GRAY_COLOR);
+			keptLine.setVisible(Boolean.TRUE.equals(on));
+			fightsOff.setText(Boolean.FALSE.equals(on) ? "<html><div style='width:155px'>Outside.wiki isn't taking encounters on"
+				+ " pages yet. Yours are kept on this computer meanwhile.</div></html>" : " ");
+			fightsOff.setVisible(Boolean.FALSE.equals(on));
+			showFights();
+		});
+	}
+
+	/** A line over the list: what the last press did (null: none). */
+	public void encounterStatus(String words)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			fightStatus.setText(words == null ? " " : "<html><div style='width:155px'>" + esc(words) + "</div></html>");
+			fightStatus.setVisible(words != null);
+			revalidate();
+		});
+	}
+
+	/** A put under way (its button waits), or done. */
+	public void putting(String file, boolean on)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			if (on)
+			{
+				putting.add(file);
+			}
+			else
+			{
+				putting.remove(file);
+			}
+			showFights();
+		});
+	}
+
+	/** The recent encounters, newest first (more: how many more the folder holds), and the character logged in (a
+	 *  recording of another goes only on that one's page). */
+	public void encounters(List<EncounterShelf.Row> rows, int more, String me)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			fightRows = rows;
+			fightMore = more;
+			fightMe = me;
+			showFights();
+		});
+	}
+
+	private void showFights()
+	{
+		fightList.removeAll();
+		if (fightRows == null)
+		{
+			fightList.add(left(small("(not read yet)")));
+		}
+		else if (fightRows.isEmpty())
+		{
+			fightList.add(left(small("<html><div style='width:155px'>None yet: they'll be here after your next boss or raid,"
+				+ " or press Record now.</div></html>")));
+		}
+		else
+		{
+			int year = java.time.LocalDate.now().getYear();
+			for (EncounterShelf.Row r : fightRows)
+			{
+				fightList.add(fightRow(r, year));
+				fightList.add(Box.createVerticalStrut(4));
+			}
+			if (fightMore > 0)
+			{
+				fightList.add(left(small(fightMore == 1 ? "and 1 older in the folder" : "and " + fightMore + " older in the folder")));
+			}
+		}
+		fightList.revalidate();
+		fightList.repaint();
+	}
+
+	private static final java.time.format.DateTimeFormatter FIGHT_DAY = java.time.format.DateTimeFormatter.ofPattern("d MMM, HH:mm");
+	private static final java.time.format.DateTimeFormatter FIGHT_YEAR = java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy");
+
+	private JPanel fightRow(EncounterShelf.Row r, int year)
+	{
+		JPanel box = new JPanel();
+		box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
+		box.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+		box.setBorder(BorderFactory.createEmptyBorder(4, 6, 6, 6));
+		// who, and its ✕
+		JPanel top = new JPanel(new BorderLayout(4, 0));
+		top.setOpaque(false);
+		JLabel who = new JLabel("<html><div style='width:140px'>" + esc(r.who == null ? "a fight" : r.who) + "</div></html>");
+		who.setFont(FontManager.getRunescapeBoldFont());
+		who.setForeground(Color.WHITE);
+		top.add(who, BorderLayout.CENTER);
+		JButton x = new JButton();
+		x.setFont(new java.awt.Font(java.awt.Font.DIALOG, java.awt.Font.PLAIN, 12));
+		x.setText(x.getFont().canDisplay('\u2715') ? "\u2715" : x.getFont().canDisplay('\u00d7') ? "\u00d7" : "x");
+		x.setMargin(new java.awt.Insets(0, 6, 0, 6));
+		x.setToolTipText("Delete this recording from this computer");
+		x.addActionListener(e ->
+		{
+			if (javax.swing.JOptionPane.showConfirmDialog(this, "<html><div style='width:240px'>Delete " + esc(r.who)
+				+ " from this computer?" + (r.fight != null ? " It stays on your page; take it down there." : "")
+				+ "</div></html>", "Delete a recording", javax.swing.JOptionPane.OK_CANCEL_OPTION,
+				javax.swing.JOptionPane.WARNING_MESSAGE) == javax.swing.JOptionPane.OK_OPTION)
+			{
+				hooks.deleteEncounter(r.file);
+			}
+		});
+		top.add(x, BorderLayout.EAST);
+		top.setMaximumSize(new Dimension(Integer.MAX_VALUE, top.getPreferredSize().height));
+		box.add(top);
+		// when, how long, and how it went
+		int s = r.ticks * 6 / 10;
+		String when = (r.when.getYear() == year ? FIGHT_DAY : FIGHT_YEAR).format(r.when);
+		JLabel facts = small(when + " · " + s / 60 + ":" + String.format("%02d", s % 60));
+		JPanel factRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+		factRow.setOpaque(false);
+		factRow.add(facts);
+		if (r.died || r.killed)
+		{
+			JLabel how = small(r.died ? " · died" : " · killed");
+			how.setForeground(r.died ? new Color(0xff, 0x69, 0xb4) : LIME);
+			factRow.add(how);
+		}
+		factRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, factRow.getPreferredSize().height));
+		box.add(factRow);
+		box.add(Box.createVerticalStrut(4));
+		boolean theirs = r.player == null || fightMe == null || OutsidePanel.sameName(r.player, fightMe);
+		boolean shown = r.shown != null ? r.shown : fightsShownFirst;
+		if (r.fight != null)
+		{
+			// (on the page, 11/21/2026: on your page ✓ · open; keep for good; shown to anyone; feature it; take down)
+			JPanel on = new JPanel(new BorderLayout(4, 0));
+			on.setOpaque(false);
+			JLabel there = small("on your page \u2713");
+			there.setForeground(LIME);
+			on.add(there, BorderLayout.CENTER);
+			JButton open = new JButton("Open");
+			open.setToolTipText("Its page on Outside.wiki, in your browser");
+			open.addActionListener(e -> hooks.openFight(r.file));
+			on.add(open, BorderLayout.EAST);
+			on.setMaximumSize(new Dimension(Integer.MAX_VALUE, on.getPreferredSize().height));
+			box.add(on);
+			javax.swing.JCheckBox keep = new javax.swing.JCheckBox("keep for good", r.kept || r.featured);
+			keep.setOpaque(false);
+			keep.setFont(FontManager.getRunescapeSmallFont());
+			keep.setEnabled(theirs && !r.featured);
+			keep.setToolTipText(r.featured ? "The featured one is always kept; feature another to let this one go"
+				: "Ticked, it stays on your page past its days (" + fightsKept + " of " + fightsKeptMost + " kept); not, it goes"
+				+ " with its days or when newer ones push it off");
+			keep.addActionListener(e -> hooks.keepFight(r.file, keep.isSelected()));
+			JPanel keepRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+			keepRow.setOpaque(false);
+			keepRow.add(keep);
+			keepRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, keepRow.getPreferredSize().height));
+			box.add(keepRow);
+		}
+		else
+		{
+			boolean busy = putting.contains(r.file) || EncounterQueue.SENDING.equals(r.send);
+			String state = sendWords(r);
+			if (state != null)
+			{
+				JLabel st = small("<html><div style='width:150px'>" + esc(state) + "</div></html>");
+				st.setForeground(EncounterQueue.REFUSED.equals(r.send) || EncounterQueue.HELD.equals(r.send) ? new Color(0xff, 0x69, 0xb4)
+					: ColorScheme.LIGHT_GRAY_COLOR);
+				box.add(left(st));
+			}
+			JButton put = new JButton(busy ? "Going up…" : "Put on my page");
+			put.setEnabled(!busy && theirs && !Boolean.FALSE.equals(fightsOn));
+			put.setToolTipText(!theirs ? "Recorded on " + r.player + ": log in on that character to put it on its page"
+				: Boolean.FALSE.equals(fightsOn) ? "Outside.wiki isn't taking encounters on pages yet"
+				: "Other players' names, their chat and your exact experience taken out first; you're shown what before it goes");
+			put.addActionListener(e -> hooks.putFight(r.file, Boolean.TRUE.equals(shownBox(put))));
+			box.add(wide(put));
+		}
+		javax.swing.JCheckBox show = new javax.swing.JCheckBox("shown to anyone", shown);
+		show.setOpaque(false);
+		show.setFont(FontManager.getRunescapeSmallFont());
+		show.setToolTipText(r.fight != null ? "Ticked, anyone who opens your page sees it; not, only you do (from Open here)"
+			: "Ticked, it goes up for anyone who opens your page; not, only you see it there");
+		show.setEnabled(theirs);
+		show.addActionListener(e -> hooks.fightShown(r.file, show.isSelected()));
+		JPanel showRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+		showRow.setOpaque(false);
+		showRow.add(show);
+		showRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, showRow.getPreferredSize().height));
+		box.add(showRow);
+		if (r.fight != null && theirs)
+		{
+			JPanel acts = new JPanel(new GridLayout(1, 2, 4, 0));
+			acts.setOpaque(false);
+			JButton feature = new JButton(r.featured ? "\u273c featured" : "feature");
+			feature.setEnabled(!r.featured);
+			feature.setToolTipText("Your page's stage shows it first, its moment turning (featuring keeps it for good)");
+			feature.addActionListener(e -> hooks.featureFight(r.file));
+			acts.add(feature);
+			JButton down = new JButton("take down");
+			down.setToolTipText("Off your page (with its moment); it stays on this computer, and won't go up again by itself");
+			down.addActionListener(e ->
+			{
+				if (javax.swing.JOptionPane.showConfirmDialog(this, "<html><div style='width:240px'>Take " + esc(r.who)
+					+ " down from your page? It stays on this computer.</div></html>", "Take down", javax.swing.JOptionPane.OK_CANCEL_OPTION,
+					javax.swing.JOptionPane.WARNING_MESSAGE) == javax.swing.JOptionPane.OK_OPTION)
+				{
+					hooks.takeDownFight(r.file);
+				}
+			});
+			acts.add(down);
+			acts.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+			box.add(acts);
+		}
+		box.putClientProperty("show", show);
+		box.setMaximumSize(new Dimension(Integer.MAX_VALUE, box.getPreferredSize().height));
+		return box;
+	}
+
+	/** What the sender's doing with one not on the page (EncounterQueue's states), as words; null for nothing to say. */
+	private String sendWords(EncounterShelf.Row r)
+	{
+		if (r.send == null)
+		{
+			return null;
+		}
+		switch (r.send)
+		{
+			case EncounterQueue.DUE:
+				return r.why != null ? r.why : r.moment ? "going up by itself, with its moment" : "going up by itself";
+			case EncounterQueue.SENDING:
+				return "going up…";
+			case EncounterQueue.REFUSED:
+				return "didn't go: " + (r.why == null ? "the relay said no" : r.why);
+			case EncounterQueue.HELD:
+				return r.why == null ? "waiting" : r.why;
+			default:
+				return r.why;
+		}
+	}
+
+	/** The "shown to anyone" box in the same row as a button. */
+	private static Boolean shownBox(java.awt.Component c)
+	{
+		for (java.awt.Component p = c; p != null; p = p.getParent())
+		{
+			if (p instanceof JPanel && ((JPanel) p).getClientProperty("show") instanceof javax.swing.JCheckBox)
+			{
+				return ((javax.swing.JCheckBox) ((JPanel) p).getClientProperty("show")).isSelected();
+			}
+		}
+		return null;
+	}
+
+	/** Two names the same as the game compares them: any case, spaces, non-breaking spaces, _ and - alike. */
+	static boolean sameName(String a, String b)
+	{
+		return a.replaceAll("[\\s\u00a0_-]+", " ").trim().equalsIgnoreCase(b.replaceAll("[\\s\u00a0_-]+", " ").trim());
+	}
+
+	/** "Put on my page" asked: what goes, and what was taken out first, said before it's sent (the Hub's warning, at the
+	 *  press that sends). */
+	public void confirmPut(String file, String who, int ticks, java.util.Map<String, Integer> removed, boolean shown, long bytes,
+		Runnable yes)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			int s = ticks * 6 / 10;
+			StringBuilder taken = new StringBuilder();
+			for (java.util.Map.Entry<String, Integer> en : removed.entrySet())
+			{
+				taken.append("<li>").append(esc(en.getKey())).append(" (").append(en.getValue()).append(")</li>");
+			}
+			String words = "<html><div style='width:280px'><b>" + esc(who) + "</b>, " + s / 60 + ":" + String.format("%02d", s % 60)
+				+ " (" + ticks + " ticks), " + String.format("%,d", Math.max(1, bytes / 1024)) + " KB."
+				+ "<br><br>Taken out before it leaves this computer:<ul>" + (taken.length() > 0 ? taken : "<li>nothing needed taking out</li>")
+				+ "</ul>What's left (what you and the NPCs did, tick by tick: where everyone stood, your gear, inventory, levels,"
+				+ " prayers and hitsplats, other players unnamed) goes to the Outside relay, a server not controlled or verified"
+				+ " by the RuneLite developers, and your Outside page shows it "
+				+ (shown ? "to anyone who opens it." : "only to you, until you tick shown to anyone.") + "</div></html>";
+			if (javax.swing.JOptionPane.showConfirmDialog(this, words, "Put on my page", javax.swing.JOptionPane.OK_CANCEL_OPTION,
+				javax.swing.JOptionPane.PLAIN_MESSAGE) == javax.swing.JOptionPane.OK_OPTION)
+			{
+				yes.run();
+			}
+			else
+			{
+				putting.remove(file);
+				showFights();
+			}
 		});
 	}
 

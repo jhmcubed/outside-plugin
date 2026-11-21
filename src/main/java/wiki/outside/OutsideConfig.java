@@ -21,6 +21,9 @@ public interface OutsideConfig extends Config
 	@ConfigSection(name = "What you're doing", description = "What your page and Outside.wiki's globe say you're doing", position = 2)
 	String doingSection = "doing";
 
+	@ConfigSection(name = "Encounters", description = "Your boss fights and raids, recorded to this computer", position = 6)
+	String encountersSection = "encounters";
+
 	@ConfigSection(name = "Advanced", description = "Your page's key, if you were given one", position = 9, closedByDefault = true)
 	String advancedSection = "advanced";
 
@@ -139,7 +142,7 @@ public interface OutsideConfig extends Config
 		keyName = "delve",
 		name = "Doom of Mokhaiotl delves",
 		description = "When you read the board beside the Doom of Mokhaiotl, how many delves you've finished at each level"
-			+ " (as the Delve Calculator plugin reads it), for your Outside page",
+			+ " (as the Delve Calculator plugin reads it), and how many a death lost from then on, for your Outside page",
 		position = 5,
 		section = shownSection
 	)
@@ -219,18 +222,99 @@ public interface OutsideConfig extends Config
 
 	@ConfigItem(
 		keyName = "goal",
-		name = "Goal item",
-		description = "On (to begin with): the item you're after (\"Set my goal item\" in the side tab, or ::outsidegoal) goes"
-			+ " to your Outside page with its 3D model, and the page shows your kill count and how dry you are for it."
-			+ " When the game's collection log says you got it, the page says so. ::outsidegoal clear takes it off",
-		warning = "On, the item you set as your goal (its name and its 3D model) and, when you get it, your kill and clue"
-			+ " counts then go to the Outside relay, a server not controlled or verified by the RuneLite developers, and"
-			+ " your Outside page shows them to anyone who opens it.",
+		name = "Goal items",
+		description = "On (to begin with): the items you're after (\"Add a goal item\" in the side tab, or ::outsidegoal) go"
+			+ " to your Outside page, one with its 3D model (the one you pick in the side tab, or none) and the rest listed under it,"
+			+ " each with your kill count and how dry you are for it. When the game's collection log or your loot says you"
+			+ " got one, the page says so. ::outsidegoal clear takes them all off",
+		warning = "On, the items you set as your goals (their names, and the 3D model of the one you show) and, when you get"
+			+ " one, your kill and clue counts then go to the Outside relay, a server not controlled or verified by the"
+			+ " RuneLite developers, and your Outside page shows them to anyone who opens it.",
 		position = 10,
 		section = shownSection
 	)
 	default boolean goal()
 	{
 		return true;
+	}
+
+	// (11/21/2026, ghillie's claude/outstation.md, "Encounters on Outside: the night's design": Encounter Recorder's
+	// recorder folded in, its files on this computer; round two, each one up by itself unless that's switched off)
+	@ConfigItem(
+		keyName = "encounters",
+		name = "Record my encounters",
+		description = "On (to begin with): your fights at bosses and raids are recorded to this computer, tick by tick, by"
+			+ " themselves (RuneLite's folder, plugin-data/outside/encounters), and end with the kill (or the loot from a chest"
+			+ " or a corpse), your death or your leaving; a raid whole, from entering to leaving its treasure room. The side"
+			+ " tab's Encounters tab lists them, records one by hand, and puts one on your Outside page"
+			+ " (by itself with \"Put each encounter on my page\" on, else when you press Put on my page). Never in the"
+			+ " Wilderness, a PvP area or on a PvP world. Needs an Outside page",
+		position = 0,
+		section = encountersSection
+	)
+	default boolean encounters()
+	{
+		return true;
+	}
+
+	// (11/21/2026, ghillie's claude/outstation.md, "Encounters, round two": every encounter up by itself, Jace's ask)
+	@ConfigItem(
+		keyName = "encounterSend",
+		name = "Put each encounter on my page",
+		description = "On (to begin with): each recording (one you started with Record now too, and one cut off by the client"
+			+ " closing, at the next start) goes to your Outside page by itself as it ends, with its scene moment (the scene"
+			+ " your game drew round the kill, as coloured dots; for a chest's loot, its reward window as you saw it): stripped"
+			+ " first as Put on my page strips"
+			+ " one (other players' names, their chat, your exact experience), then sent to the Outside relay, a server not"
+			+ " controlled or verified by the RuneLite developers. Shown to anyone or kept to yourself as your page starts"
+			+ " new ones, unless you tick otherwise in the Encounters tab. Off, nothing goes till you press Put on my page."
+			+ " Never from the Wilderness, a PvP area or a PvP world",
+		position = 1,
+		section = encountersSection
+	)
+	default boolean encounterSend()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "encounterPlayers",
+		name = "Players around you",
+		description = "Record what other players near you do too (where they stand, their gear, animations and hitsplats):"
+			+ " a raid's team. On this computer only; putting an encounter on your page takes every other player's name out"
+			+ " first. From the next recording",
+		position = 2,
+		section = encountersSection
+	)
+	default boolean encounterPlayers()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "encounterNpcs",
+		name = "Also for these NPCs",
+		description = "NPC ids, separated by commas: a recording starts when one appears (or another NPC turns into one) and"
+			+ " stops once none has been seen for 50 ticks, or with the kill. For a fight Outside doesn't know as a boss",
+		position = 3,
+		section = encountersSection
+	)
+	default String encounterNpcs()
+	{
+		return "";
+	}
+
+	@ConfigItem(
+		keyName = "encounterKeepMb",
+		name = "Keep up to (MB)",
+		description = "The newest encounters are kept on this computer within this many megabytes; past it, the oldest go"
+			+ " (one on your page stays there)",
+		position = 4,
+		section = encountersSection
+	)
+	@net.runelite.client.config.Range(min = 20, max = 10000)
+	default int encounterKeepMb()
+	{
+		return 200;
 	}
 }

@@ -90,9 +90,14 @@ import org.slf4j.LoggerFactory;
  * Their character's model, its motions and the live view (Kept), off to begin with.
  * Their bank, off to begin with.
  * Their deathbank, as they last looked in it, off to begin with.
+ * Their fights at bosses and raids, recorded to this computer (Encounters, Encounter Recorder's recorder folded in), and
+ * one put on their page when they press Put on my page, stripped first (EncounterStrip, EncounterShelf; 11/21/2026).
  */
 @PluginDescriptor(
 	name = "Outside",
+	// (11/21/2026: the Plugin Hub's name, which RuneLite's getPluginDirectory needs for this plugin's own folder of files,
+	// plugin-data/outside: the encounters are kept there)
+	internalName = "outside",
 	description = "Your gear, stats, quests, diaries and slayer task on your own page at Outside.wiki",
 	tags = {"outside", "loadout", "inventory", "profile", "quests", "diaries", "slayer", "discord"}
 )
@@ -113,7 +118,7 @@ public class OutsidePlugin extends Plugin
 	static final long UPDATE_EVERY_MS = 60_000L;
 	/** what a snapshot carries (the rest of read()'s fields are the socket's) */
 	static final String[] SNAP_FIELDS = {"name", "type", "worn", "inv", "bag", "pouch", "seeds", "barrel", "quiver",
-		"charges", "skills", "quests", "diaries", "combat", "slayer", "delve", "clog", "counts"};   // (delve: update 2; clog: the collection log's counter; counts: kill and clue counts, 11/16/2026)
+		"charges", "skills", "quests", "diaries", "combat", "slayer", "delve", "delve_lost", "clog", "counts"};   // (delve: update 2; clog: the collection log's counter; counts: kill and clue counts, 11/16/2026; delve_lost: the delve levels lost to deaths, 11/19/2026)
 
 	@Inject
 	private Client client;
@@ -193,6 +198,10 @@ public class OutsidePlugin extends Plugin
 	private int checkedItem = -1, checkedTick = -100, ticks;
 	/** (11/14/2026) the Doom of Mokhaiotl board's counts as last read (also kept on the profile), or null */
 	private JsonElement delveSeen;
+	/** (11/19/2026) the delve levels lost to deaths (Delves: this run's, and all lost, kept on the profile), and those
+	 *  lost as they stood when the board was last read (sent beside it), or null */
+	private final Delves delves = new Delves();
+	private JsonElement delveLostSeen;
 	/** (11/14/2026) the bank changed on this tick (sent a few ticks after the last change), or -1 */
 	private int bankChanged = -1;
 	/** (11/16/2026) the deathbank as it was last seen, {where, locked, ids, quantities}, sent a couple of ticks after
@@ -206,9 +215,28 @@ public class OutsidePlugin extends Plugin
 	private int deathTick = -1;
 	private String deathLine;
 	private static final MediaType JSON = MediaType.parse("application/json");
+	/** the encounters (11/21/2026): the recorder, on RuneLite's event bus while the plugin's on, and its files */
+	@Inject
+	private net.runelite.client.eventbus.EventBus eventBus;
+	/** the frame as drawn, for the loot window's picture (round three) */
+	@Inject
+	private net.runelite.client.ui.DrawManager drawManager;
+	private Encounters encounters;
+	private EncounterShelf shelf;
+	/** an encounter's file going up gzipped: 8 MB at most (the relay's MAX_FIGHT) */
+	static final int FIGHT_MOST = 8 * 1024 * 1024;
+	private static final MediaType GZIP = MediaType.parse("application/gzip");
+	private static final MediaType OCTETS = MediaType.parse("application/octet-stream");
+	/** (11/21/2026, round two) each recording's scene moment makings, by its packed file, till it's packed and built; the
+	 *  sender's timer and whether a send is under way */
+	private final Map<String, EncounterScene.Taken> takenFor = new java.util.concurrent.ConcurrentHashMap<>();
+	private ScheduledFuture<?> sendTimer;
+	private final java.util.concurrent.atomic.AtomicBoolean sending = new java.util.concurrent.atomic.AtomicBoolean();
 	/** the board beside the Doom of Mokhaiotl (the Delve Calculator plugin's: its scoreboard interface, each level's
 	 *  count in child 46 + 3 a level, 1 to 8, then the waves past 8) */
 	private static final int DELVE_BOARD = 920, DELVE_FIRST = 46, DELVE_STEP = 3;
+	/** the Doom's lair, its delves' regions (the Delve Calculator plugin's: its DELVE_REGION_IDS) */
+	private static final int[] DELVE_REGIONS = {5269, 13668, 14180};
 
 	@Inject
 	private ConfigManager configManager;
@@ -232,6 +260,13 @@ public class OutsidePlugin extends Plugin
 		panel = new OutsidePanel(panelHooks());
 		navButton = net.runelite.client.ui.NavigationButton.builder().tooltip("Outside").icon(tabIcon()).priority(8).panel(panel).build();
 		clientToolbar.addNavigation(navButton);
+		shelf = new EncounterShelf(gson, this::getPluginDirectory);
+		encounters = new Encounters(client, clientThread, gson, encounterHost());
+		eventBus.register(encounters);
+		// (round three: what a crash left behind goes up by itself too, once packed, with the switch on; Jace, 11/21/2026)
+		shelf.tidy(encounterMost(), encounters.busy(), config.encounterSend(), this::listEncounters);
+		// (each encounter up by itself: what's due tried every 30 s, and as each is ready; 11/21/2026)
+		sendTimer = executor.scheduleWithFixedDelay(this::pumpSends, 20, 30, TimeUnit.SECONDS);
 		Attach a = key();
 		panel.who(a == null ? null : a.getChannel());
 		if (a != null)
@@ -252,6 +287,23 @@ public class OutsidePlugin extends Plugin
 		if (panel != null)
 		{
 			panel.stop();
+		}
+		if (encounters != null)
+		{
+			// (stopped on the client's thread, as every game call here; packed on its own thread after)
+			Encounters e = encounters;
+			clientThread.invoke(() -> e.shutDown("plugin turned off"));
+			eventBus.unregister(e);
+			encounters = null;
+		}
+		if (sendTimer != null)
+		{
+			sendTimer.cancel(false);
+			sendTimer = null;
+		}
+		if (shelf != null)
+		{
+			shelf.shutDown();
 		}
 		// (RuneLite closing, or the plugin switched off, while they're logged in: as a logout)
 		if (posted && client.getGameState() == GameState.LOGGED_IN)
@@ -329,6 +381,16 @@ public class OutsidePlugin extends Plugin
 				keep("goal", null);
 			}
 		}
+		if (e.getKey().equals("encounters") && panel != null)
+		{
+			panel.recordingOn(config.encounters());
+		}
+		if (e.getKey().equals("encounterSend") && panel != null)
+		{
+			panel.sendingOn(config.encounterSend());
+			// (switched on: what's waiting goes now; 11/21/2026)
+			pumpSends();
+		}
 		if (e.getKey().equals("bank") && !config.bank())
 		{
 			keep("bank", null);
@@ -373,7 +435,9 @@ public class OutsidePlugin extends Plugin
 			// (the seed box and the barrel as the game last sent them: another account may log in next)
 			seedsSeen = barrelSeen = null;
 			charges.clear();
-			delveSeen = null;
+			delveSeen = delveLostSeen = null;
+			delves.left();
+			delves.load(null);
 		}
 		if (e.getGameState() == GameState.LOGIN_SCREEN)
 		{
@@ -405,6 +469,11 @@ public class OutsidePlugin extends Plugin
 			characterChanged();
 		}
 		ticks++;
+		// (a delve's run over once they're away from the boss: claimed and gone, or left in the chest, nothing lost)
+		if (delves.running() && !atDelve())
+		{
+			delves.left();
+		}
 		// (the bank: sent three ticks after it last changed, so a whole deposit goes once)
 		if (bankChanged >= 0 && ticks - bankChanged >= 3)
 		{
@@ -827,11 +896,14 @@ public class OutsidePlugin extends Plugin
 		if (config.delve() && delveSeen != null)
 		{
 			m.put("delve", delveSeen);
+			// (the levels lost to deaths as they stood when the board was read: Delves; none sent till it's read again)
+			m.put("delve_lost", delveLostSeen == null ? JsonNull.INSTANCE : delveLostSeen);
 		}
 		else
 		{
 			// (switched off: taken off the page, as quests and slayer are; the relay keeps each field as last sent)
 			m.put("delve", JsonNull.INSTANCE);
+			m.put("delve_lost", JsonNull.INSTANCE);
 		}
 		if (config.skills())
 		{
@@ -1032,6 +1104,11 @@ public class OutsidePlugin extends Plugin
 				configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "counts", gson.toJson(counts.json()));
 			}
 		}
+		// (a delve level done, counted in its run: Delves)
+		if ((e.getType() == ChatMessageType.GAMEMESSAGE || e.getType() == ChatMessageType.SPAM) && config.delve())
+		{
+			delves.done(Text.removeTags(e.getMessage()));
+		}
 		if (e.getType() == ChatMessageType.GAMEMESSAGE || e.getType() == ChatMessageType.SPAM)
 		{
 			deathbankLine(Text.removeTags(e.getMessage()));
@@ -1110,6 +1187,13 @@ public class OutsidePlugin extends Plugin
 		if (any)
 		{
 			delveSeen = counts;
+			// (the levels lost to deaths, as they stand now: the board just read counts them too)
+			JsonArray lost = new JsonArray();
+			for (int n : delves.lost)
+			{
+				lost.add(n);
+			}
+			delveLostSeen = lost;
 			saveKept();
 		}
 	}
@@ -1118,7 +1202,7 @@ public class OutsidePlugin extends Plugin
 	@Subscribe
 	public void onCommandExecuted(CommandExecuted e)
 	{
-		// (::outsidegoal opens the item search for the goal; ::outsidegoal clear takes it off)
+		// (::outsidegoal opens the item search to add a goal; ::outsidegoal clear takes them all off)
 		if ("outsidegoal".equalsIgnoreCase(e.getCommand()))
 		{
 			if (e.getArguments().length > 0 && "clear".equalsIgnoreCase(e.getArguments()[0]))
@@ -1193,70 +1277,197 @@ public class OutsidePlugin extends Plugin
 		return im;
 	}
 
-	// ---- the goal item (Goal.java; 11/17/2026, update 3) ----
+	// ---- the goal items (Goal.java; 11/17/2026, update 3; a list since 11/19/2026) ----
 
-	/** The game's item search in the chatbox, for the goal: as you type, only the items that match, a click sets it. */
+	/** This account's goals, as kept (the one goal kept before 11/19/2026 read into the list once, then let go). */
+	private Goal.Kept goals()
+	{
+		String kept = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.LIST);
+		if (kept != null)
+		{
+			return Goal.Kept.from(kept, gson);
+		}
+		Integer item = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM, Integer.class);
+		if (item == null || item <= 0)
+		{
+			return new Goal.Kept();
+		}
+		Goal.Kept k = Goal.Kept.fromOne(item, configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT, Long.class),
+			configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS), gson);
+		goalsKeep(k);
+		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM);
+		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT);
+		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS);
+		return k;
+	}
+
+	private void goalsKeep(Goal.Kept k)
+	{
+		if (k.list.isEmpty())
+		{
+			configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.LIST);
+		}
+		else
+		{
+			configManager.setRSProfileConfiguration(OutsideConfig.GROUP, Goal.LIST, k.json(gson));
+		}
+	}
+
+	private String itemName(int id)
+	{
+		return itemManager.getItemComposition(id).getName();
+	}
+
+	/** The game's item search in the chatbox, for a goal: as you type, only the items that match, a click adds it. */
 	private void goalPick()
 	{
 		clientThread.invokeLater(() ->
 		{
 			if (!config.goal())
 			{
-				say("switch on \"Goal item\" in the plugin's settings first");
+				say("switch on \"Goal items\" in the plugin's settings first");
 				return;
 			}
 			if (client.getGameState() != net.runelite.api.GameState.LOGGED_IN)
 			{
-				say("log in first: the goal is your account's own");
+				say("log in first: your goals are your account's own");
 				return;
 			}
-			goalSearch.tooltipText("Set as my Outside goal")
+			if (goals().list.size() >= Goal.MOST)
+			{
+				say("you have " + Goal.MOST + " goals, the most there can be: take one off (its \u2715 in the side tab) first");
+				return;
+			}
+			goalSearch.tooltipText("Add to my Outside goals")
 				.onItemSelected(id -> clientThread.invokeLater(() -> goalChosen(id)))
 				.build();
 		});
 	}
 
-	/** An item chosen: kept for this account, sent with its model (on the client's thread). */
+	/** An item chosen: added to this account's goals, and the goals sent (on the client's thread). */
 	private void goalChosen(int id)
 	{
 		int item = itemManager.canonicalize(id);
-		configManager.setRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM, item);
-		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT);
-		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS);
-		sendGoal();
-		goalPanel();
-		say("your goal is " + itemManager.getItemComposition(item).getName() + ": your Outside page shows it, your kill count and how dry you are");
+		Goal.Kept k = goals();
+		String name = itemName(item);
+		if (k.find(item) != null)
+		{
+			say(name + " is one of your goals already");
+			return;
+		}
+		if (!k.add(item))
+		{
+			say("you have " + Goal.MOST + " goals, the most there can be: take one off first");
+			return;
+		}
+		goalsKeep(k);
+		sendGoalSoon();
+		goalPanel(k);
+		say(k.list.size() == 1
+			? "your goal is " + name + ": your Outside page shows it, your kill count and how dry you are"
+			: name + " is added to your goals: your Outside page lists it" + (k.model ? " under " + itemName(k.shown) : "") + ", with your kill count and how dry you are");
 	}
 
-	/** The side tab's goal line, as this account's goal stands (on the client's thread). */
+	/** The one shown as its 3D model on the page (the side tab's choice; on the client's thread). */
+	private void goalShown(int id)
+	{
+		Goal.Kept k = goals();
+		if (!k.show(id))
+		{
+			return;
+		}
+		goalsKeep(k);
+		sendGoalSoon();
+		goalPanel(k);
+	}
+
+	/** None shown as a model: every goal listed with its picture (the side tab's "No 3D model"; on the client's thread). */
+	private void goalNoModel()
+	{
+		Goal.Kept k = goals();
+		if (!k.noModel())
+		{
+			return;
+		}
+		goalsKeep(k);
+		sendGoalSoon();
+		goalPanel(k);
+	}
+
+	/** One goal taken off (its \u2715; on the client's thread). */
+	private void goalForget(int id)
+	{
+		Goal.Kept k = goals();
+		if (!k.forget(id))
+		{
+			return;
+		}
+		goalsKeep(k);
+		goalPanel(k);
+		if (k.list.isEmpty())
+		{
+			goalSoon++;
+			keep("goal", null);
+			say("your goal's off your Outside page");
+		}
+		else
+		{
+			sendGoalSoon();
+			say(itemName(id) + " is off your goals");
+		}
+	}
+
+	/** The side tab's goals, as this account's stand (on the client's thread). */
 	private void goalPanel()
+	{
+		goalPanel(goals());
+	}
+
+	private void goalPanel(Goal.Kept k)
 	{
 		if (panel == null)
 		{
 			return;
 		}
-		Integer item = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM, Integer.class);
-		if (item == null || item <= 0)
+		List<OutsidePanel.GoalRow> rows = new ArrayList<>();
+		for (Goal.One g : k.list)
 		{
-			panel.goal(null);
-			return;
+			rows.add(new OutsidePanel.GoalRow(g.id, itemName(g.id), g.got > 0, k.model && g.id == k.shown));
 		}
-		boolean got = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT, Long.class) != null;
-		panel.goal(itemManager.getItemComposition(item).getName() + (got ? " (got)" : ""));
+		panel.goals(rows, Goal.MOST, k.model);
 	}
 
+	/** Every goal taken off (::outsidegoal clear). */
 	private void goalClear()
 	{
+		goalsKeep(new Goal.Kept());
 		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM);
 		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT);
 		configManager.unsetRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS);
+		goalSoon++;
 		keep("goal", null);
 		goalPanel();
-		say("your goal's off your Outside page");
+		say("your goals are off your Outside page");
 	}
 
-	/** The goal set for this account to the keep: the item, its model as the game draws it (its own recolours and
-	 *  retextures), and when it was got with the counts then (on the client's thread). */
+	/** (the goals sent a moment after the last change, so a few presses in a row are one upload: the relay takes 24 an
+	 *  hour, every kind together) */
+	private int goalSoon;
+
+	private void sendGoalSoon()
+	{
+		int mine = ++goalSoon;
+		executor.schedule(() -> clientThread.invokeLater(() ->
+		{
+			if (mine == goalSoon)
+			{
+				sendGoal(false);
+			}
+		}), 2, TimeUnit.SECONDS);
+	}
+
+	/** The goals set for this account to the keep: the one shown with its model as the game draws it (its own recolours
+	 *  and retextures), the rest under it, and when each was got with the counts then (on the client's thread). */
 	private void sendGoal()
 	{
 		sendGoal(false);
@@ -1266,12 +1477,44 @@ public class OutsidePlugin extends Plugin
 	 *  next update (Update my page, or the hourly one), as the bank does: the reviewer's terms, a press or the hourly sync. */
 	private void sendGoal(boolean byItself)
 	{
-		Integer item = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM, Integer.class);
-		if (!config.goal() || item == null || item <= 0)
+		Goal.Kept k = goals();
+		if (!config.goal() || k.list.isEmpty())
 		{
 			return;
 		}
-		net.runelite.api.ItemComposition c = itemManager.getItemComposition(item);
+		JsonObject shown = null;
+		List<JsonObject> more = new ArrayList<>();
+		for (Goal.One g : k.pageOrder())
+		{
+			net.runelite.api.ItemComposition c = itemManager.getItemComposition(g.id);
+			JsonObject model = shown == null && k.model ? goalModel(c) : null;
+			JsonObject one = Goal.body(g.id, c.getName(), model, g.got, g.counts);
+			if (shown == null)
+			{
+				shown = one;
+			}
+			else
+			{
+				more.add(one);
+			}
+		}
+		JsonObject body = Goal.body(shown, more);
+		if (byItself && HOLD_KEEPS)
+		{
+			synchronized (keepHeld)
+			{
+				keepHeld.put("goal", body);
+			}
+			return;
+		}
+		keep("goal", body);
+	}
+
+	private int goalModelSaid;
+
+	/** The item's model as the game draws it (null: it couldn't be read, said in the chat; its picture goes instead). */
+	private JsonObject goalModel(net.runelite.api.ItemComposition c)
+	{
 		// (11/18/2026, the first goal on the Hub came without its model: its textures were copied whether it had any or
 		// not, and an item with none, most of them, threw there; now each step only as the item needs it, the model sent
 		// unlit if lighting it fails, and why it couldn't be read said in the chat)
@@ -1341,60 +1584,52 @@ public class OutsidePlugin extends Plugin
 				}
 			}
 		}
-		if (model == null)
+		if (model == null && goalModelSaid != c.getId())
 		{
+			goalModelSaid = c.getId();   // (said once an item, not with every change to the list)
 			log.debug("outside: the goal's model: {}", why);
-			say("your goal goes to your page as its picture: its 3D model couldn't be read (" + (why == null ? "no reason given" : why) + ")");
+			say("your goal " + c.getName() + " goes to your page as its picture: its 3D model couldn't be read (" + (why == null ? "no reason given" : why) + ")");
 		}
-		Long got = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT, Long.class);
-		String then = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS);
-		JsonObject countsThen = null;
-		try
-		{
-			countsThen = then == null ? null : gson.fromJson(then, JsonObject.class);
-		}
-		catch (RuntimeException ex)
-		{
-			countsThen = null;
-		}
-		JsonObject body = Goal.body(item, c.getName(), model, got == null ? 0 : got, countsThen);
-		if (byItself && HOLD_KEEPS)
-		{
-			synchronized (keepHeld)
-			{
-				keepHeld.put("goal", body);
-			}
-			return;
-		}
-		keep("goal", body);
+		return model;
 	}
 
-	/** The game's collection log line: the goal's, it's got. */
+	/** The game's collection log line: a goal's, it's got. */
 	private void goalLine(String added)
 	{
-		Integer item = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM, Integer.class);
-		if (added != null && item != null && item > 0 && Goal.isIt(added, itemManager.getItemComposition(item).getName()))
+		if (added == null)
 		{
-			goalGot();
+			return;
+		}
+		for (Goal.One g : goals().list)
+		{
+			if (g.got <= 0 && Goal.isIt(added, itemName(g.id)))
+			{
+				goalGot(g.id);
+				return;
+			}
 		}
 	}
 
-	/** Loot as RuneLite reads it (a kill's, or the Loot Tracker's: a raid's chest, a casket, a minigame's reward): the
+	/** Loot as RuneLite reads it (a kill's, or the Loot Tracker's: a raid's chest, a casket, a minigame's reward): a
 	 *  goal among it, it's got (11/18/2026, update 4: the collection log's line shows only the first time, and only
 	 *  with its notification on in the game's settings). */
 	private void goalLoot(java.util.Collection<net.runelite.client.game.ItemStack> items)
 	{
-		Integer item = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.ITEM, Integer.class);
-		if (items == null || item == null || item <= 0 || !config.goal())
+		if (items == null || !config.goal())
+		{
+			return;
+		}
+		Goal.Kept k = goals();
+		if (k.list.isEmpty())
 		{
 			return;
 		}
 		for (net.runelite.client.game.ItemStack it : items)
 		{
-			if (it != null && itemManager.canonicalize(it.getId()) == item)
+			Goal.One g = it == null ? null : k.find(itemManager.canonicalize(it.getId()));
+			if (g != null && g.got <= 0)
 			{
-				goalGot();
-				return;
+				goalGot(g.id);
 			}
 		}
 	}
@@ -1414,19 +1649,22 @@ public class OutsidePlugin extends Plugin
 		goalLoot(e.getItems());
 	}
 
-	/** The goal's got (once): when, and the counts then, kept with it and sent (in the Hub's version, with the next
+	/** A goal's got (once): when, and the counts then, kept with it and sent (in the Hub's version, with the next
 	 *  update). */
-	private void goalGot()
+	private void goalGot(int id)
 	{
-		if (configManager.getRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT, Long.class) != null)
+		Goal.Kept k = goals();
+		Goal.One g = k.find(id);
+		if (g == null || g.got > 0)
 		{
 			return;
 		}
-		configManager.setRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT, System.currentTimeMillis());
-		configManager.setRSProfileConfiguration(OutsideConfig.GROUP, Goal.GOT_COUNTS, gson.toJson(counts.json()));
+		g.got = System.currentTimeMillis();
+		g.counts = counts.json();
+		goalsKeep(k);
 		sendGoal(true);
-		goalPanel();
-		say(HOLD_KEEPS ? "your goal's got: your Outside page says so with your next update" : "your goal's got: your Outside page says so");
+		goalPanel(k);
+		say(HOLD_KEEPS ? "your goal " + itemName(id) + "'s got: your Outside page says so with your next update" : "your goal " + itemName(id) + "'s got: your Outside page says so");
 	}
 
 	private OutsidePanel.Hooks panelHooks()
@@ -1434,15 +1672,27 @@ public class OutsidePlugin extends Plugin
 		return new OutsidePanel.Hooks()
 		{
 			@Override
-			public void setGoal()
+			public void addGoal()
 			{
 				goalPick();
 			}
 
 			@Override
-			public void clearGoal()
+			public void showGoal(int id)
 			{
-				clientThread.invokeLater(() -> goalClear());
+				clientThread.invokeLater(() -> goalShown(id));
+			}
+
+			@Override
+			public void forgetGoal(int id)
+			{
+				clientThread.invokeLater(() -> goalForget(id));
+			}
+
+			@Override
+			public void noGoalModel()
+			{
+				clientThread.invokeLater(() -> goalNoModel());
 			}
 
 			@Override
@@ -1748,6 +1998,48 @@ public class OutsidePlugin extends Plugin
 				});
 			}
 
+			/** "Edit my page" (11/21/2026, update 6; docs/protocol.md "Editing the page from the page"): a token made here
+			 *  on the press, handed to the relay with the page's key, and the page opened with it in the fragment. It
+			 *  arranges the page and sets its theme song, nothing else, for 2 hours. */
+			@Override
+			public void editPage()
+			{
+				Attach a = key();
+				if (a == null)
+				{
+					panel.editStatus("log in on a character with a page first");
+					return;
+				}
+				String token = Tend.token(new java.security.SecureRandom());
+				String code = friendsOnly ? watchCode(false) : null;
+				panel.editStatus("opening your page to edit…");
+				http.newCall(new Request.Builder().url(a.editUrl())
+					.header("User-Agent", "outside-plugin/" + VERSION)
+					.post(RequestBody.create(JSON, Tend.body(token, gson))).build()).enqueue(new Callback()
+				{
+					@Override
+					public void onFailure(Call call, IOException ex)
+					{
+						panel.editStatus("the relay's out of reach: try again in a moment");
+					}
+
+					@Override
+					public void onResponse(Call call, Response r)
+					{
+						try (Response res = r)
+						{
+							if (res.code() != 200)
+							{
+								panel.editStatus("the relay said no (" + res.code() + ")");
+								return;
+							}
+						}
+						panel.editStatus("opened in your browser: arrange this file, and your theme song, for the next 2 hours");
+						net.runelite.client.util.LinkBrowser.browse(a.editPage(code, token));
+					}
+				});
+			}
+
 			/** "Tend my page's chat" (11/16/2026; docs/protocol.md "Tending the page's chat from the page"): a token made
 			 *  here, handed to the relay with the page's key, and the page opened with it in the fragment. */
 			@Override
@@ -1792,6 +2084,123 @@ public class OutsidePlugin extends Plugin
 						net.runelite.client.util.LinkBrowser.browse(a.tendPage(token));
 					}
 				});
+			}
+			@Override
+			public boolean recordingOn()
+			{
+				return config.encounters();
+			}
+
+			@Override
+			public void setRecordingOn(boolean on)
+			{
+				configManager.setConfiguration(OutsideConfig.GROUP, "encounters", on);
+			}
+
+			@Override
+			public void recordToggle()
+			{
+				clientThread.invoke(() ->
+				{
+					if (encounters == null)
+					{
+						return;
+					}
+					if (encounters.running())
+					{
+						encounters.stopByHand();
+						panel.encounterStatus(null);
+						return;
+					}
+					String no = encounters.startByHand();
+					panel.encounterStatus(no);
+				});
+			}
+
+			@Override
+			public void encountersShown()
+			{
+				panel.encounterStatus(null);
+				listEncounters();
+				readFights();
+			}
+
+			@Override
+			public void putFight(String file, boolean shown)
+			{
+				putEncounter(file, shown);
+			}
+
+			@Override
+			public void fightShown(String file, boolean shown)
+			{
+				showEncounter(file, shown);
+			}
+
+			@Override
+			public void openFight(String file)
+			{
+				openEncounter(file);
+			}
+
+			@Override
+			public boolean sendingOn()
+			{
+				return config.encounterSend();
+			}
+
+			@Override
+			public void setSendingOn(boolean on)
+			{
+				configManager.setConfiguration(OutsideConfig.GROUP, "encounterSend", on);
+			}
+
+			@Override
+			public void keepFight(String file, boolean keep)
+			{
+				markEncounter(file, "kept=" + (keep ? "1" : "0"), keep ? "kept for good on your page" : "no longer kept for good: it goes with its days");
+			}
+
+			@Override
+			public void featureFight(String file)
+			{
+				markEncounter(file, "featured=1", "featured on your page (and kept for good)");
+			}
+
+			@Override
+			public void takeDownFight(String file)
+			{
+				takeDownEncounter(file);
+			}
+
+			@Override
+			public void deleteEncounter(String file)
+			{
+				if (shelf != null && encounters != null)
+				{
+					shelf.delete(file, encounters.busy(), OutsidePlugin.this::listEncounters, panel::encounterStatus);
+				}
+			}
+
+			@Override
+			public void copyEncountersFolder()
+			{
+				if (shelf == null)
+				{
+					return;
+				}
+				shelf.where(path ->
+				{
+					try
+					{
+						java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new java.awt.datatransfer.StringSelection(path), null);
+						panel.encounterStatus("copied: " + path);
+					}
+					catch (IllegalStateException | java.awt.HeadlessException ex)
+					{
+						panel.encounterStatus("the clipboard's busy: it's " + path);
+					}
+				}, panel::encounterStatus);
 			}
 		};
 	}
@@ -2807,12 +3216,44 @@ public class OutsidePlugin extends Plugin
 		keep("bank", Kept.bank(ids, qs, tabs, names));
 	}
 
-	/** Their own death (11/16/2026): what they carried and wore as they fell, and where. */
+	/** Their own death: a delve's levels lost with it (11/19/2026), and what they carried and wore as they fell. */
 	@Subscribe
 	public void onActorDeath(ActorDeath e)
 	{
 		Player me = client.getLocalPlayer();
-		if (!config.deathbank() || me == null || e.getActor() != me)
+		if (me == null || e.getActor() != me)
+		{
+			return;
+		}
+		if (config.delve() && atDelve() && delves.died())
+		{
+			configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "delveLost", delves.keep());
+		}
+		deathbankDied();
+	}
+
+	/** Whether they're in the Doom of Mokhaiotl's lair (DELVE_REGIONS, by the instance's own map). */
+	private boolean atDelve()
+	{
+		WorldPoint at = here();
+		if (at == null)
+		{
+			return false;
+		}
+		for (int r : DELVE_REGIONS)
+		{
+			if (at.getRegionID() == r)
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/** Their own death (11/16/2026): what they carried and wore as they fell, and where. */
+	private void deathbankDied()
+	{
+		if (!config.deathbank())
 		{
 			return;
 		}
@@ -3056,6 +3497,9 @@ public class OutsidePlugin extends Plugin
 			counts.load(n == null ? null : gson.fromJson(n, JsonObject.class));
 			String d = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "delve");
 			delveSeen = d == null ? null : gson.fromJson(d, JsonArray.class);
+			delves.load(configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "delveLost"));
+			String dl = configManager.getRSProfileConfiguration(OutsideConfig.GROUP, "delveLostSeen");
+			delveLostSeen = dl == null ? null : gson.fromJson(dl, JsonArray.class);
 		}
 		catch (RuntimeException e)
 		{
@@ -3074,6 +3518,10 @@ public class OutsidePlugin extends Plugin
 		if (delveSeen != null)
 		{
 			configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "delve", gson.toJson(delveSeen));
+		}
+		if (delveLostSeen != null)
+		{
+			configManager.setRSProfileConfiguration(OutsideConfig.GROUP, "delveLostSeen", gson.toJson(delveLostSeen));
 		}
 	}
 
@@ -3247,6 +3695,796 @@ public class OutsidePlugin extends Plugin
 			case 6: return "UNRANKED_GROUP_IRONMAN";
 			default: return "NORMAL";
 		}
+	}
+
+	// ---- the encounters (11/21/2026; ghillie's claude/outstation.md, "Encounters on Outside: the night's design";
+	// docs/protocol.md, "Recorded fights"): the recorder's needs, the side tab's list, and putting one on the page
+
+	/** What the recorder (Encounters) needs from the plugin. */
+	private Encounters.Host encounterHost()
+	{
+		return new Encounters.Host()
+		{
+			@Override
+			public net.runelite.client.util.Filepath folder() throws IOException
+			{
+				return getPluginDirectory();
+			}
+
+			@Override
+			public boolean hasPage()
+			{
+				return key() != null;
+			}
+
+			@Override
+			public boolean autoOn()
+			{
+				return config.encounters();
+			}
+
+			@Override
+			public boolean otherPlayers()
+			{
+				return config.encounterPlayers();
+			}
+
+			@Override
+			public String npcIds()
+			{
+				return config.encounterNpcs();
+			}
+
+			@Override
+			public long most()
+			{
+				return encounterMost();
+			}
+
+			@Override
+			public String version()
+			{
+				return VERSION;
+			}
+
+			@Override
+			public void recording(String words, boolean running)
+			{
+				if (panel != null)
+				{
+					panel.encounterRecording(words, running);
+				}
+			}
+
+			@Override
+			public void filesChanged(String packed)
+			{
+				Encounters e = encounters;
+				EncounterShelf sh = shelf;
+				if (sh != null && packed != null)
+				{
+					sh.packed(packed, encounterMost(), e == null ? java.util.Collections.emptySet() : e.busy(), () ->
+					{
+						listEncounters();
+						// (11/21/2026, round two: its moment built; the sender waits for it)
+						sh.moment(packed, takenFor.remove(packed), () ->
+						{
+							listEncounters();
+							pumpSends();
+						});
+					});
+				}
+			}
+
+			@Override
+			public Object[] itemLabel(int id, int qty)
+			{
+				return groundItemLabel(id, qty);
+			}
+
+			@Override
+			public long[] prices(int id)
+			{
+				return itemPrices(id);
+			}
+
+			@Override
+			public void picture(java.awt.Rectangle bounds, java.util.function.Consumer<byte[]> done)
+			{
+				framePicture(bounds, done);
+			}
+
+			@Override
+			public void ended(String packed, EncounterScene.Taken taken, String reason)
+			{
+				if (taken != null)
+				{
+					takenFor.put(packed, taken);
+				}
+				// (never from anywhere dangerous; with the switch on, every other end goes up by itself, "Record now"'s
+				// too (Jace, 11/21/2026: "in case someone wants to record something that isn't a fight"). Queued now,
+				// in the index before it's even packed, so a client closed meanwhile still sends it next time; the sender
+				// waits for its file and its moment. A part split at the length limit isn't sent: the last part sends
+				// them all, joined; round three)
+				if (Encounters.SPLIT.equals(reason))
+				{
+					return;
+				}
+				if (shelf != null && taken != null)
+				{
+					shelf.expect(packed);
+				}
+				if (shelf != null && config.encounterSend() && !"the Wilderness or PvP".equals(reason))
+				{
+					shelf.queue(packed, OutsidePlugin.this::listEncounters);
+				}
+			}
+		};
+	}
+
+	/** An item's GE price (RuneLite's own) and high alchemy value, each, a noted one's the item it notes (as the Ground
+	 *  Items plugin reads them; coins 1 and 1): {ge, ha}, or null. The client's thread. (11/21/2026, round three) */
+	private long[] itemPrices(int id)
+	{
+		net.runelite.api.ItemComposition def = itemManager.getItemComposition(id);
+		if (def == null)
+		{
+			return null;
+		}
+		int real = def.getNote() != -1 ? def.getLinkedNoteId() : id;
+		net.runelite.api.ItemComposition base = real != id ? itemManager.getItemComposition(real) : def;
+		if (base == null)
+		{
+			return null;
+		}
+		boolean coins = real == net.runelite.api.gameval.ItemID.COINS;
+		return new long[]{coins ? 1 : itemManager.getItemPrice(real), coins ? 1 : base.getHaPrice()};
+	}
+
+	/**
+	 * The next frame the client draws (RuneLite's DrawManager, the frame as the player sees it), cropped to a box on the
+	 * canvas and written as a PNG off the client's thread: the loot's window as it was drawn (11/21/2026, round three).
+	 * Nothing leaves this computer from here: it goes into the encounter's moment beside its file.
+	 */
+	private void framePicture(java.awt.Rectangle bounds, java.util.function.Consumer<byte[]> done)
+	{
+		drawManager.requestNextFrameListener(image ->
+		{
+			int w = image.getWidth(null), h = image.getHeight(null);
+			java.awt.Rectangle b = bounds.intersection(new java.awt.Rectangle(0, 0, w, h));
+			if (b.isEmpty())
+			{
+				return;
+			}
+			java.awt.image.BufferedImage crop = new java.awt.image.BufferedImage(b.width, b.height, java.awt.image.BufferedImage.TYPE_INT_RGB);
+			java.awt.Graphics2D g = crop.createGraphics();
+			g.drawImage(image, 0, 0, b.width, b.height, b.x, b.y, b.x + b.width, b.y + b.height, null);
+			g.dispose();
+			executor.execute(() ->
+			{
+				try
+				{
+					done.accept(Encounters.png(crop));
+				}
+				catch (IOException | RuntimeException e)
+				{
+					log.debug("outside: the loot window's picture couldn't be written", e);
+				}
+			});
+		});
+	}
+
+	/**
+	 * A ground item's name as RuneLite's Ground Items plugin writes it over its tile (1.13.7, GroundItemsOverlay with its
+	 * defaults; ghillie's replay/3d/moment.js itemText, the browser's twin): the name (a noted one's, the item it notes),
+	 * "(qty)" past 1, then for all but coins "(GE: … gp)" from RuneLite's own prices and "(HA: … gp)", each times the
+	 * quantity, by QuantityFormatter; its colour by the higher of the two (the plugin's tiers). {text, colour, value}.
+	 * The client's thread.
+	 */
+	private Object[] groundItemLabel(int id, int qty)
+	{
+		net.runelite.api.ItemComposition def = itemManager.getItemComposition(id);
+		if (def == null)
+		{
+			return null;
+		}
+		int real = def.getNote() != -1 ? def.getLinkedNoteId() : id;
+		net.runelite.api.ItemComposition base = real != id ? itemManager.getItemComposition(real) : def;
+		if (base == null)
+		{
+			return null;
+		}
+		boolean coins = real == net.runelite.api.gameval.ItemID.COINS;
+		long ge = coins ? 1 : itemManager.getItemPrice(real), ha = coins ? 1 : base.getHaPrice();
+		long value = Math.max(ge * qty, ha * qty);
+		StringBuilder text = new StringBuilder(base.getName());
+		if (qty > 1)
+		{
+			text.append(" (").append(net.runelite.client.util.QuantityFormatter.quantityToStackSize(qty)).append(")");
+		}
+		if (id != net.runelite.api.gameval.ItemID.COINS)
+		{
+			if (ge * qty > 0)
+			{
+				text.append(" (GE: ").append(net.runelite.client.util.QuantityFormatter.quantityToStackSize(ge * qty)).append(" gp)");
+			}
+			if (ha * qty > 0)
+			{
+				text.append(" (HA: ").append(net.runelite.client.util.QuantityFormatter.quantityToStackSize(ha * qty)).append(" gp)");
+			}
+		}
+		return new Object[]{text.toString(), EncounterScene.tier(value), value};
+	}
+
+	/** "Keep up to (MB)", in bytes. */
+	private long encounterMost()
+	{
+		return Math.max(20, config.encounterKeepMb()) * 1024L * 1024L;
+	}
+
+	/** The side tab's list read again (the files thread), for the character logged in. */
+	private void listEncounters()
+	{
+		Encounters e = encounters;
+		if (shelf == null || panel == null || e == null)
+		{
+			return;
+		}
+		shelf.list(e.busy(), (rows, more) -> panel.encounters(rows, more, shownName), panel::encounterStatus);
+	}
+
+	/** The page's own list of its encounters (GET /fights/<channel>?key=, on the press that opens the tab): whether the
+	 *  page takes them at all (404: the relay's fights are off), whether a new one starts shown, what's still on it, which
+	 *  are kept for good and featured, and how many may be kept (11/21/2026). */
+	private void readFights()
+	{
+		Attach a = key();
+		if (a == null || panel == null)
+		{
+			return;
+		}
+		http.newCall(new Request.Builder().url(a.fightsUrl()).header("User-Agent", "outside-plugin/" + VERSION).build()).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				panel.encounterStatus("the relay's out of reach: what's on your page isn't known just now");
+			}
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				try (Response res = r)
+				{
+					String body = res.body() == null ? "" : res.body().string();
+					JsonObject o = null;
+					try
+					{
+						o = gson.fromJson(body, JsonObject.class);
+					}
+					catch (RuntimeException ignored)
+					{
+						// (an answer that isn't JSON: said by its code below)
+					}
+					if (res.code() == 404 && o != null && o.has("error") && o.get("error").getAsString().contains("fights aren't on"))
+					{
+						panel.fightsState(false, false, 0, 0);
+						return;
+					}
+					if (res.code() != 200 || o == null || !o.has("fights") || !o.get("fights").isJsonArray())
+					{
+						panel.encounterStatus("the relay said " + res.code() + (o != null && o.has("error") ? ": " + o.get("error").getAsString() : ""));
+						return;
+					}
+					boolean first = o.has("public_default") && o.get("public_default").getAsBoolean();
+					int most = o.has("kept") && o.get("kept").isJsonPrimitive() ? o.get("kept").getAsInt() : 12;
+					String featured = o.has("featured") && o.get("featured").isJsonPrimitive() ? o.get("featured").getAsString() : null;
+					Map<String, boolean[]> fights = new HashMap<>();
+					int kept = 0;
+					for (JsonElement f : o.getAsJsonArray("fights"))
+					{
+						if (f.isJsonObject() && f.getAsJsonObject().has("id"))
+						{
+							JsonObject fo = f.getAsJsonObject();
+							String id = fo.get("id").getAsString();
+							boolean k = fo.has("kept") && fo.get("kept").getAsBoolean();
+							kept += k ? 1 : 0;
+							fights.put(id, new boolean[]{fo.has("public") && fo.get("public").getAsBoolean(), k, id.equals(featured)});
+						}
+					}
+					panel.fightsState(true, first, kept, most);
+					shelf.reconcile(a.getChannel(), fights, OutsidePlugin.this::listEncounters);
+				}
+				catch (IOException | RuntimeException ex)
+				{
+					panel.encounterStatus("the relay's answer couldn't be read");
+				}
+			}
+		});
+	}
+
+	/** "Put on my page" (the side tab): the recording stripped as the page strips one (EncounterStrip), what was taken out
+	 *  said, and only once that's agreed to, sent with its moment (postFight). */
+	private void putEncounter(String file, boolean shown)
+	{
+		Attach a = key();
+		if (a == null || shelf == null)
+		{
+			panel.encounterStatus("log in on a character with a page first");
+			return;
+		}
+		String me = shownName;
+		panel.putting(file, true);
+		panel.encounterStatus("reading it…");
+		shelf.prepare(file, p ->
+		{
+			if (p.summary.player != null && me != null && !OutsidePanel.sameName(p.summary.player, me))
+			{
+				panel.putting(file, false);
+				panel.encounterStatus("that was recorded on " + p.summary.player + ": log in on that character to put it on its page");
+				return;
+			}
+			if (p.gz.length + (p.moment == null ? 0 : p.moment.length) > FIGHT_MOST)
+			{
+				panel.putting(file, false);
+				panel.encounterStatus(String.format("it's %.1f MB packed: a page takes 8 MB at most", p.gz.length / 1048576.0));
+				return;
+			}
+			panel.encounterStatus(null);
+			panel.confirmPut(file, p.summary.who(), (int) p.summary.ticks, p.removed, shown, p.gz.length,
+				() -> postFight(a, p, shown, false, 1));
+		}, problem ->
+		{
+			panel.putting(file, false);
+			panel.encounterStatus(problem);
+		});
+	}
+
+	/**
+	 * Each encounter up by itself (11/21/2026; ghillie's claude/outstation.md, "Encounters, round two"; EncounterQueue):
+	 * with "Put each encounter on my page" on and a page for the character logged in, the oldest recording due goes, one
+	 * at a time, off the client's thread (the shelf's files thread strips it, OkHttp sends it). One whose last send went
+	 * unanswered is looked for on the page first, and not sent again if it's there.
+	 */
+	private void pumpSends()
+	{
+		EncounterShelf sh = shelf;
+		Encounters e = encounters;
+		Attach a = key();
+		String me = shownName;
+		if (sh == null || e == null || a == null || me == null || !config.encounterSend() || client.getGameState() != GameState.LOGGED_IN
+			|| !sending.compareAndSet(false, true))
+		{
+			return;
+		}
+		sh.nextDue(System.currentTimeMillis(), me, e.busy(), due ->
+		{
+			if (due == null)
+			{
+				sending.set(false);
+				return;
+			}
+			if (due.unsure)
+			{
+				findOnPage(a, due, () -> sendDue(a, due));
+			}
+			else
+			{
+				sendDue(a, due);
+			}
+		});
+	}
+
+	/** One sent before with no answer seen: the page's list read, and if it's there it's taken as sent (never twice). */
+	private void findOnPage(Attach a, EncounterShelf.Due due, Runnable notThere)
+	{
+		http.newCall(new Request.Builder().url(a.fightsUrl()).header("User-Agent", "outside-plugin/" + VERSION).build()).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				// (still out of reach: as unsure as before, and later)
+				shelf.sent(due.file, EncounterQueue.lost(System.currentTimeMillis(), 1), null, null, null, OutsidePlugin.this::sendDone);
+			}
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				try (Response res = r)
+				{
+					JsonObject o = gson.fromJson(res.body() == null ? "" : res.body().string(), JsonObject.class);
+					if (res.code() == 200 && o != null && o.has("fights") && o.get("fights").isJsonArray())
+					{
+						for (JsonElement f : o.getAsJsonArray("fights"))
+						{
+							if (!f.isJsonObject())
+							{
+								continue;
+							}
+							JsonObject fo = f.getAsJsonObject();
+							Map<String, Object> m = new HashMap<>();
+							m.put("at", fo.has("at") ? fo.get("at").getAsDouble() : 0.0);
+							m.put("ticks", fo.has("ticks") ? fo.get("ticks").getAsDouble() : 0.0);
+							if (EncounterQueue.sameFight(m, due.at, due.ticks) && fo.has("id"))
+							{
+								log.debug("outside: {} was on the page already: not sent again", due.file);
+								shelf.sent(due.file, new EncounterQueue.After(EncounterQueue.SENT, 0, null), fo.get("id").getAsString(), a.getChannel(),
+									fo.has("public") && fo.get("public").getAsBoolean(), OutsidePlugin.this::sendDone);
+								return;
+							}
+						}
+					}
+				}
+				catch (IOException | RuntimeException ex)
+				{
+					// (an answer that can't be read: sent as if it isn't there; the relay's list is what's known)
+				}
+				notThere.run();
+			}
+		});
+	}
+
+	private void sendDue(Attach a, EncounterShelf.Due due)
+	{
+		String me = shownName;
+		shelf.prepare(due.file, p ->
+		{
+			if (p.summary.player != null && (me == null || !OutsidePanel.sameName(p.summary.player, me)))
+			{
+				shelf.sent(due.file, new EncounterQueue.After(EncounterQueue.DUE, 0, "waiting for " + p.summary.player + " to log in"), null, null,
+					null, this::sendDone);
+				return;
+			}
+			if (p.gz.length > FIGHT_MOST)
+			{
+				shelf.sent(due.file, new EncounterQueue.After(EncounterQueue.REFUSED, 0, String.format("%.1f MB packed: a page takes 8 MB at most",
+					p.gz.length / 1048576.0)), null, null, null, this::sendDone);
+				return;
+			}
+			if (p.gz.length + (p.moment == null ? 0 : p.moment.length) > FIGHT_MOST)
+			{
+				p.moment = null;
+			}
+			shelf.entryOf(due.file, e ->
+			{
+				Boolean shown = e != null && e.has("shown") ? e.get("shown").getAsBoolean() : null;
+				postFight(a, p, shown, true, e == null ? 1 : shelf.triesOf(e));
+			});
+		}, problem -> shelf.sent(due.file, new EncounterQueue.After(EncounterQueue.REFUSED, 0, problem), null, null, null, this::sendDone));
+	}
+
+	/** A send finished (whatever it came to): the next due one, if any. */
+	private void sendDone()
+	{
+		listEncounters();
+		sending.set(false);
+		if (sendTimer != null)
+		{
+			executor.schedule(this::pumpSends, 2, TimeUnit.SECONDS);
+		}
+	}
+
+	/**
+	 * A recording onto the page: POST /fights/<channel>?key=, multipart: meta (fights.js's put(): foe, label, at, ticks,
+	 * died, taken, dealt, and public only when the player's chosen; without it the relay's public_default), fight (the
+	 * stripped recording, gzipped), and its scene moment with moment_tick when it has one (docs/protocol.md, "One upload
+	 * with its moment"). {@code auto}: the sender's (its state kept by EncounterQueue), else Put on my page's.
+	 */
+	private void postFight(Attach a, EncounterShelf.Prepared p, Boolean shown, boolean auto, int tries)
+	{
+		String file = p.file;
+		if (!auto)
+		{
+			panel.encounterStatus("putting it on your page…");
+		}
+		okhttp3.MultipartBody.Builder mb = new okhttp3.MultipartBody.Builder().setType(okhttp3.MultipartBody.FORM)
+			.addFormDataPart("meta", EncounterStrip.meta(p.summary, shown))
+			.addFormDataPart("fight", "fight.jsonl.gz", RequestBody.create(GZIP, p.gz));
+		if (p.moment != null)
+		{
+			mb.addFormDataPart("moment", "moment.bin", RequestBody.create(OCTETS, p.moment));
+			mb.addFormDataPart("moment_tick", String.valueOf(p.momentTick));
+		}
+		http.newCall(new Request.Builder().url(a.fightsUrl()).header("User-Agent", "outside-plugin/" + VERSION).post(mb.build()).build()).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException ex)
+			{
+				panel.putting(file, false);
+				EncounterQueue.After after = EncounterQueue.lost(System.currentTimeMillis(), tries);
+				if (!auto)
+				{
+					panel.encounterStatus("the relay's out of reach: it goes up by itself once it can");
+				}
+				shelf.sent(file, after, null, null, null, auto ? OutsidePlugin.this::sendDone : OutsidePlugin.this::listEncounters);
+			}
+
+			@Override
+			public void onResponse(Call call, Response r)
+			{
+				try (Response res = r)
+				{
+					String text = res.body() == null ? "" : res.body().string();
+					JsonObject o = null;
+					try
+					{
+						o = gson.fromJson(text, JsonObject.class);
+					}
+					catch (RuntimeException ignored)
+					{
+						// (said by its code below)
+					}
+					String error = o != null && o.has("error") && o.get("error").isJsonPrimitive() ? o.get("error").getAsString() : null;
+					EncounterQueue.After after = EncounterQueue.answered(res.code(), res.header("Retry-After"), error, System.currentTimeMillis(), tries);
+					panel.putting(file, false);
+					if (res.code() == 201 && o != null && o.has("fight") && o.get("fight").isJsonObject())
+					{
+						JsonObject f = o.getAsJsonObject("fight");
+						String id = f.get("id").getAsString();
+						boolean pub = f.has("public") && f.get("public").getAsBoolean();
+						shelf.sent(file, after, id, a.getChannel(), pub, auto ? OutsidePlugin.this::sendDone : OutsidePlugin.this::listEncounters);
+						if (!auto)
+						{
+							panel.encounterStatus(p.summary.who() + " is on your page" + (pub ? "" : ", kept to yourself"));
+						}
+						return;
+					}
+					if (res.code() == 404 && error != null && error.contains("fights aren't on"))
+					{
+						panel.fightsState(false, false, 0, 0);
+					}
+					if (!auto)
+					{
+						panel.encounterStatus(res.code() == 403 ? "the relay didn't take your page's key: nothing went"
+							: res.code() == 429 ? "nothing went: " + after.why : "nothing went: " + (error != null ? error : "the relay said " + res.code()));
+					}
+					// (Put on my page's own failure leaves a queued one as it was; the sender's, as the answer says)
+					if (auto || EncounterQueue.SENT.equals(after.state))
+					{
+						shelf.sent(file, after, null, null, null, auto ? OutsidePlugin.this::sendDone : OutsidePlugin.this::listEncounters);
+					}
+					else
+					{
+						listEncounters();
+					}
+				}
+				catch (IOException | RuntimeException ex)
+				{
+					panel.putting(file, false);
+					if (!auto)
+					{
+						panel.encounterStatus("the relay's answer couldn't be read");
+					}
+					shelf.sent(file, EncounterQueue.lost(System.currentTimeMillis(), tries), null, null, null,
+						auto ? OutsidePlugin.this::sendDone : OutsidePlugin.this::listEncounters);
+				}
+			}
+		});
+	}
+
+	/** One on the page changed (POST /fights/<channel>/<id>?…): kept for good or not, or featured (featuring keeps it). A
+	 *  409's reason (twelve kept already) said as the relay says it. */
+	private void markEncounter(String file, String what, String done)
+	{
+		Attach a = key();
+		if (shelf == null || a == null)
+		{
+			return;
+		}
+		shelf.entryOf(file, e ->
+		{
+			String id = e != null && e.has("fight") ? e.get("fight").getAsString() : null;
+			String channel = e != null && e.has("channel") ? e.get("channel").getAsString() : null;
+			if (id == null || !a.getChannel().equals(channel))
+			{
+				panel.encounterStatus("that one isn't on this character's page");
+				listEncounters();
+				return;
+			}
+			http.newCall(new Request.Builder().url(a.fightUrl(id, what)).header("User-Agent", "outside-plugin/" + VERSION)
+				.post(RequestBody.create(JSON, "{}")).build()).enqueue(new Callback()
+			{
+				@Override
+				public void onFailure(Call call, IOException ex)
+				{
+					panel.encounterStatus("the relay's out of reach: try again in a bit");
+					listEncounters();
+				}
+
+				@Override
+				public void onResponse(Call call, Response r)
+				{
+					try (Response res = r)
+					{
+						JsonObject o = null;
+						try
+						{
+							o = gson.fromJson(res.body() == null ? "" : res.body().string(), JsonObject.class);
+						}
+						catch (RuntimeException ignored)
+						{
+							// (said by its code)
+						}
+						if (res.code() == 200 && o != null)
+						{
+							Boolean kept = o.has("kept") ? o.get("kept").getAsBoolean() : null;
+							Boolean featured = o.has("featured") ? o.get("featured").getAsBoolean() : null;
+							shelf.marks(file, kept, featured, () ->
+							{
+								listEncounters();
+								readFights();
+							});
+							panel.encounterStatus(done);
+							return;
+						}
+						if (res.code() == 404)
+						{
+							shelf.onPage(file, null, null, null, OutsidePlugin.this::listEncounters);
+							panel.encounterStatus("that one isn't on your page any more");
+							return;
+						}
+						panel.encounterStatus(o != null && o.has("error") ? o.get("error").getAsString() : "the relay said " + res.code());
+						listEncounters();
+					}
+					catch (IOException ex)
+					{
+						panel.encounterStatus("the relay's answer couldn't be read");
+					}
+				}
+			});
+		});
+	}
+
+	/** "Take down": off the page (DELETE /fights/<channel>/<id>), its moment with it; the file stays here, and the sender
+	 *  never puts it up again by itself. */
+	private void takeDownEncounter(String file)
+	{
+		Attach a = key();
+		if (shelf == null || a == null)
+		{
+			return;
+		}
+		shelf.entryOf(file, e ->
+		{
+			String id = e != null && e.has("fight") ? e.get("fight").getAsString() : null;
+			if (id == null)
+			{
+				return;
+			}
+			http.newCall(new Request.Builder().url(a.fightUrl(id, (String) null)).header("User-Agent", "outside-plugin/" + VERSION)
+				.delete().build()).enqueue(new Callback()
+			{
+				@Override
+				public void onFailure(Call call, IOException ex)
+				{
+					panel.encounterStatus("the relay's out of reach: it's still up; try again in a bit");
+				}
+
+				@Override
+				public void onResponse(Call call, Response r)
+				{
+					try (Response res = r)
+					{
+						if (res.code() == 204 || res.code() == 404)
+						{
+							shelf.onPage(file, null, null, null, () ->
+							{
+								shelf.sent(file, new EncounterQueue.After(EncounterQueue.SENT, 0, "taken down from your page"), null, null, null,
+									OutsidePlugin.this::listEncounters);
+								readFights();
+							});
+							panel.encounterStatus("taken down from your page; it's still on this computer");
+							return;
+						}
+						panel.encounterStatus("the relay said " + res.code() + ": it's still up");
+					}
+				}
+			});
+		});
+	}
+
+	/** "Shown to anyone" ticked or not: on the page at once (POST /fights/<channel>/<id>?public=), or kept as the choice
+	 *  for when it goes. */
+	private void showEncounter(String file, boolean shown)
+	{
+		Attach a = key();
+		if (shelf == null)
+		{
+			return;
+		}
+		shelf.entryOf(file, e ->
+		{
+			String id = e != null && e.has("fight") ? e.get("fight").getAsString() : null;
+			String channel = e != null && e.has("channel") ? e.get("channel").getAsString() : null;
+			if (id == null || a == null || !a.getChannel().equals(channel))
+			{
+				shelf.onPage(file, null, null, shown, OutsidePlugin.this::listEncounters);
+				return;
+			}
+			http.newCall(new Request.Builder().url(a.fightUrl(id, shown)).header("User-Agent", "outside-plugin/" + VERSION)
+				.post(RequestBody.create(JSON, "{}")).build()).enqueue(new Callback()
+			{
+				@Override
+				public void onFailure(Call call, IOException ex)
+				{
+					panel.encounterStatus("the relay's out of reach: try again in a bit");
+					listEncounters();
+				}
+
+				@Override
+				public void onResponse(Call call, Response r)
+				{
+					try (Response res = r)
+					{
+						if (res.code() == 404)
+						{
+							// (taken down on the page, or gone with its days: no longer on it)
+							shelf.onPage(file, null, null, shown, OutsidePlugin.this::listEncounters);
+							panel.encounterStatus("that one isn't on your page any more");
+							return;
+						}
+						if (res.code() != 200)
+						{
+							panel.encounterStatus("the relay said " + res.code());
+							listEncounters();
+							return;
+						}
+						shelf.onPage(file, channel, id, shown, OutsidePlugin.this::listEncounters);
+						panel.encounterStatus(shown ? "shown to anyone now" : "kept to yourself now");
+					}
+				}
+			});
+		});
+	}
+
+	/** "Open": its page on Outside.wiki; one kept to themselves opens with a tending token in the fragment (as Read and
+	 *  tend my register's), which only the page's own browser then holds. */
+	private void openEncounter(String file)
+	{
+		Attach a = key();
+		if (a == null || shelf == null)
+		{
+			return;
+		}
+		shelf.entryOf(file, e ->
+		{
+			String id = e != null && e.has("fight") ? e.get("fight").getAsString() : null;
+			boolean shown = e != null && e.has("shown") && e.get("shown").getAsBoolean();
+			if (id == null)
+			{
+				return;
+			}
+			String page = a.fightPage(id, friendsOnly ? watchCode(false) : null);
+			if (shown)
+			{
+				net.runelite.client.util.LinkBrowser.browse(page);
+				return;
+			}
+			String token = Tend.token(new java.security.SecureRandom());
+			http.newCall(new Request.Builder().url(a.tendUrl()).header("User-Agent", "outside-plugin/" + VERSION)
+				.post(RequestBody.create(JSON, Tend.body(token, gson))).build()).enqueue(new Callback()
+			{
+				@Override
+				public void onFailure(Call call, IOException ex)
+				{
+					panel.encounterStatus("the relay's out of reach: try again in a moment");
+				}
+
+				@Override
+				public void onResponse(Call call, Response r)
+				{
+					try (Response res = r)
+					{
+						if (res.code() != 200)
+						{
+							panel.encounterStatus("the relay said no (" + res.code() + ")");
+							return;
+						}
+					}
+					net.runelite.client.util.LinkBrowser.browse(page + "#tend=" + token);
+				}
+			});
+		});
 	}
 
 	private void say(String words)
