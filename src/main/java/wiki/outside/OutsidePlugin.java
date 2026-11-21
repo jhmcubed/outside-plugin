@@ -3822,9 +3822,7 @@ public class OutsidePlugin extends Plugin
 			{
 				try
 				{
-					java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
-					javax.imageio.ImageIO.write(crop, "png", out);
-					done.accept(out.toByteArray());
+					done.accept(Encounters.png(crop));
 				}
 				catch (IOException | RuntimeException e)
 				{
