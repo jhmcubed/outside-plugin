@@ -31,6 +31,17 @@ public class AttachTest
 	}
 
 	@Test
+	public void theEncountersRoutes()
+	{
+		Attach a = new Attach("relay.ghillie.workers.dev", "jhmcubed", "k3y-k3y-k3y");
+		assertEquals("https://relay.ghillie.workers.dev/fights/jhmcubed?key=k3y-k3y-k3y", a.fightsUrl());
+		assertEquals("https://relay.ghillie.workers.dev/fights/jhmcubed/upl1MVobEcCgDxIc-Z-MgQ?key=k3y-k3y-k3y&public=1",
+			a.fightUrl("upl1MVobEcCgDxIc-Z-MgQ", true));
+		assertEquals("https://outside.wiki/jhmcubed/fight/upl1MVobEcCgDxIc-Z-MgQ", a.fightPage("upl1MVobEcCgDxIc-Z-MgQ", null));
+		assertEquals("https://outside.wiki/jhmcubed/fight/upl1MVobEcCgDxIc-Z-MgQ?code=a-b_c", a.fightPage("upl1MVobEcCgDxIc-Z-MgQ", "a-b_c"));
+	}
+
+	@Test
 	public void tendingThePagesChat()
 	{
 		// (11/16/2026: the token handed in by the page's key, and the page opened with it in the fragment)
