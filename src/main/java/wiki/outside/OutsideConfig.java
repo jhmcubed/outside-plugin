@@ -238,6 +238,43 @@ public interface OutsideConfig extends Config
 		return true;
 	}
 
+	// (update 7, 11/22/2026: the collection log read by Outside itself, for players who don't use RuneProfile)
+	@ConfigItem(
+		keyName = "clog",
+		name = "Send my collection log",
+		description = "Off to begin with. On: open your collection log and press Outside in its top row, and the slots you"
+			+ " have and how many of each go to your Outside page straight away; each slot the game's chat says you've"
+			+ " added goes within three minutes. Your page uses it where RuneProfile has nothing, or where it's newer."
+			+ " Never from the Wilderness, a PvP area or a PvP world (it goes once you've left). Off takes it off your page",
+		warning = "On, your collection log's slots (each item you have in it and how many) go to the Outside relay, a server"
+			+ " not controlled or verified by the RuneLite developers, when you press Outside in your collection log and as"
+			+ " the game's chat names new ones, and your Outside page shows them to anyone who opens it. Switching it off"
+			+ " takes them off your page.",
+		position = 11,
+		section = shownSection
+	)
+	default boolean clog()
+	{
+		return false;
+	}
+
+	// (update 7, 11/22/2026: the personal bests RuneLite's Chat Commands plugin already keeps; on to begin with, as the
+	// kill counts are, since they go only with an update, as the rest of the snapshot does)
+	@ConfigItem(
+		keyName = "pbs",
+		name = "Send my personal bests",
+		description = "On (to begin with): the personal best times RuneLite already keeps (its Chat Commands plugin's, from"
+			+ " the game's kill and personal best lines and your house's Adventure Log) go to your Outside page with your"
+			+ " updates when they've changed, each by its boss (and a raid's by team size). Never a Wilderness boss's."
+			+ " Nothing while the Chat Commands plugin is off. Off takes them off your page",
+		position = 12,
+		section = shownSection
+	)
+	default boolean pbs()
+	{
+		return true;
+	}
+
 	// (11/21/2026, ghillie's claude/outstation.md, "Encounters on Outside: the night's design": Encounter Recorder's
 	// recorder folded in, its files on this computer; round two, each one up by itself unless that's switched off)
 	@ConfigItem(
