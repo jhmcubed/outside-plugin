@@ -187,6 +187,10 @@ public class OutsidePanel extends PluginPanel
 	private JButton updateButton;
 	private final JLabel dinkStatus = small(" ");
 	private final JLabel notesLine = small(" ");
+	/** under Update my page: the collection log's line (update 7), and when the page last took it (0: no time said) */
+	private final JLabel clogLine = small(" ");
+	private String clogWords;
+	private long clogAt;
 	private volatile long updateWaits;
 	private final javax.swing.Timer updateClock = new javax.swing.Timer(250, e -> updateCount());
 	// (11/16/2026, the permissions review: who sees the page, and taking it down, with the plugin alone)
@@ -272,6 +276,9 @@ public class OutsidePanel extends PluginPanel
 		snapStatus.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
 		snapStatus.setVisible(false);
 		page.add(left(snapStatus));
+		clogLine.setForeground(LIME);
+		clogLine.setVisible(false);
+		page.add(left(clogLine));
 		page.add(Box.createVerticalStrut(4));
 		// (11/21/2026, update 6; Jace, of editing his own page and adding a song: "Build it, they should be a part of update
 		// 6"): Edit my page beside Open my page, the page opened to arrange it and set its theme song
@@ -359,10 +366,12 @@ public class OutsidePanel extends PluginPanel
 		pageTab.add(Box.createVerticalStrut(12));
 		// (11/18/2026, Jace: "a button to the plugin that opens up their page and embeds the key into it so they dont have
 		// to manually paste it": the aether takes an outstation's own name with its key, asked for on the page otherwise)
-		pageTab.add(left(heading("The aether")));
-		pageTab.add(left(small("<html><div style='width:155px'>Outside.wiki's chat across every page. Your name is"
-			+ " yours there: this opens your page in your browser with your key, kept in that browser, so the aether"
-			+ " lets you in under your own name.</div></html>")));
+		// (11/22/2026: the same key signs notes in any page's register, with the lime star)
+		pageTab.add(left(heading("The aether and registers")));
+		pageTab.add(left(small("<html><div style='width:155px'>Outside.wiki's chat across every page, and every page's"
+			+ " register. Your name is yours there: this opens your page in your browser with your key, kept in that"
+			+ " browser, so the aether lets you in under your own name and your notes in any register carry your lime"
+			+ " star.</div></html>")));
 		pageTab.add(Box.createVerticalStrut(6));
 		pageTab.add(wide(button("Talk in the aether as me", hooks::aetherAsMe)));
 		pageTab.add(Box.createVerticalStrut(12));
@@ -569,6 +578,7 @@ public class OutsidePanel extends PluginPanel
 	private void showSnap()
 	{
 		infoUpdated.setText(snapAt <= 0 ? "not this session" : snapWords(snapAt).replaceFirst("^updated ", ""));
+		showClog();   // (its "just now" kept true as the clock runs)
 	}
 
 	/** Whose page it is (their channel), or that there's no key yet. */
@@ -623,6 +633,25 @@ public class OutsidePanel extends PluginPanel
 			notesLine.setVisible(n > 0);
 			revalidate();
 		});
+	}
+
+	/** The collection log's line under Update my page (null: hidden), with how long ago `at` was (0: none). */
+	public void clogLine(String words, long at)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			clogWords = words;
+			clogAt = at;
+			showClog();
+		});
+	}
+
+	private void showClog()
+	{
+		String w = clogWords == null ? null : clogAt > 0 ? clogWords + ", " + snapWords(clogAt).replaceFirst("^updated ", "") : clogWords;
+		clogLine.setText(w == null ? " " : "<html><div style='width:155px'>" + esc(w) + "</div></html>");
+		clogLine.setVisible(w != null);
+		revalidate();
 	}
 
 	/** A line under "Edit my page" (none: hidden). */
