@@ -768,9 +768,14 @@ public class OutsidePlugin extends Plugin
 		{
 			return;
 		}
+		clogPressed = true;
 		client.menuAction(-1, InterfaceID.Collection.SEARCH_TOGGLE, MenuAction.CC_OP, 1, -1, "Search", null);
 		client.runScript(Clog.INIT);
 	}
+
+	/** A press of Outside whose read hasn't been said in the chat yet (11/23/2026, Jace's test: the line came twice,
+	 *  once for the press's read and again a minute on for the page the log drew as its search closed) */
+	private volatile boolean clogPressed;
 
 	@Subscribe
 	public void onScriptPreFired(net.runelite.api.events.ScriptPreFired e)
@@ -936,8 +941,10 @@ public class OutsidePlugin extends Plugin
 			int n = Clog.synced(body, clogSynced());
 			configManager.setRSProfileConfiguration(OutsideConfig.GROUP, CLOG_SYNCED, n);
 			configManager.setRSProfileConfiguration(OutsideConfig.GROUP, CLOG_AT, System.currentTimeMillis());
-			if (body.has("had"))
+			// (said for a press's read; a page's slots read as it's drawn go up without a word)
+			if (body.has("had") && clogPressed)
 			{
+				clogPressed = false;
 				say("your collection log is on your page: " + n + (n == 1 ? " slot" : " slots"));
 			}
 		}
