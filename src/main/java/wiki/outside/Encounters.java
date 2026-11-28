@@ -519,6 +519,9 @@ final class Encounters
 	private String clickedKind, clickedName, clickedOption;
 	/** the inventory as it was, item by item (id to count), for a corpse's loot (what it gained after the click) */
 	private Map<Integer, Long> invBefore = new HashMap<>();
+	/** the inventory and the worn equipment at the click on a corpse, then as of each change after it: what a change
+	 *  gained is worked out against them (corpseLoot) */
+	private Map<Integer, Long> invSeen = new HashMap<>(), wornSeen = new HashMap<>();
 	/** the windows being taken as the client draws them (their `window` lines and the moment's picture; round five),
 	 *  their pictures as they come back from the frame, and those written and still open (for their `window_close`) */
 	private final List<Shot> shots = new ArrayList<>();
@@ -683,6 +686,13 @@ final class Encounters
 			raidDone = -1;
 			raidOver = false;
 			looted.clear();
+			// (and the last click with it: the tick count starts again at 0, so a click left from the last fight read as
+			// one a few ticks ago, and the next fight's first potion drunk as its corpse's loot. 11/25/2026, Jace of
+			// BigSneezi's Araxxor kills: "dragonwarhammer is showing up as his loot")
+			clickedKind = null;
+			clickedOption = null;
+			clickedAt = null;
+			clickedTick = -1000;
 			corpseOf = null;
 			waitingFor = null;
 			delve = false;
@@ -2455,9 +2465,45 @@ final class Encounters
 					{
 						objectSeen(tile.getGroundObject(), true);
 					}
+					// Under a bridge: the plane below's own tile, which the client hangs under the bridge it moves down a
+					// plane (its objects aren't in the scene's tiles at all: the Nylocas room's web, the Leviathan's
+					// plateau; 11/26/2026). Written with "below" and plane 0, the map's own plane for them.
+					Tile below = tile.getBridge();
+					if (below != null)
+					{
+						for (GameObject obj : below.getGameObjects())
+						{
+							if (obj != null && obj.getSceneMinLocation().equals(below.getSceneLocation()))
+							{
+								objectBelow(obj);
+							}
+						}
+						objectBelow(below.getWallObject());
+						objectBelow(below.getDecorativeObject());
+						objectBelow(below.getGroundObject());
+					}
 				}
 			}
 		}
+	}
+
+	/** An object on the tile under a bridge, written once with the map loaded (see the scene's own scan) */
+	private void objectBelow(TileObject obj)
+	{
+		if (obj == null)
+		{
+			return;
+		}
+		if (definedObjects.add(obj.getId()))
+		{
+			emit("objdef").add("def", EncounterSnap.objectDefinition(client.getObjectDefinition(obj.getId())));
+		}
+		JsonObject o = EncounterSnap.object(obj);
+		o.addProperty("init", true);
+		o.addProperty("below", true);
+		o.addProperty("pl", 0);
+		JsonObject line = emit("obj");
+		o.entrySet().forEach(entry -> line.add(entry.getKey(), entry.getValue()));
 	}
 
 	private void objectSeen(TileObject obj, boolean initial)
@@ -3436,8 +3482,11 @@ final class Encounters
 			{
 				// (Doom's level-end window shows the pile before it's claimed: the claim is its loot, below; but the window
 				// is the level's offer, taken each time it opens; round five, Jace: "I'd like if the replay showed loot too
-				// for each level")
-				shoot("burrow", c.window, null, null, c.inv, false, null);
+				// for each level". Between levels the pile is in DOM_LOOTPILE_DURING (935), DOM_LOOTPILE (923) sent empty
+				// till the claim: the game's own Investigate sends both, then opens 919 (rsprox captures of delves 1-4,
+				// the local world's TSPS session, 11/23/2026); reading 923 here had left every level's picture waiting
+				// on nothing, and SaluteCFlagg's delve showed none)
+				shoot(BURROW, c.window, null, null, InventoryID.DOM_LOOTPILE_DURING, false, null);
 				continue;
 			}
 			if (c.window != group)
@@ -3589,6 +3638,16 @@ final class Encounters
 		}
 		clickedTick = whole();
 		invBefore = counts(client.getItemContainer(InventoryID.INV));
+		invSeen = invBefore;
+		wornSeen = counts(client.getItemContainer(InventoryID.WORN));
+	}
+
+	/** Whether the last click was within {@code ticks} ticks, and not from the future (a click from before the clock
+	 *  began again; 11/25/2026). */
+	private boolean clickedWithin(int ticks)
+	{
+		int since = whole() - clickedTick;
+		return since >= 0 && since <= ticks;
 	}
 
 	/** A container's items, [id, quantity] each, the empty slots left out. */
@@ -3645,17 +3704,78 @@ final class Encounters
 	 *  inventory"; the ground only when it's full, and that's the item lines). */
 	private void corpseLoot(ItemContainer inv)
 	{
-		if (!"npc".equals(clickedKind) || FORFEIT_OPTIONS.contains(clickedOption) || whole() - clickedTick > CORPSE_TAKE
+		if (!"npc".equals(clickedKind) || FORFEIT_OPTIONS.contains(clickedOption) || !clickedWithin(CORPSE_TAKE)
 			|| looted.contains("corpse") || scene == null
 			|| !scene.killed() || raidArea() != null)
 		{
 			return;
 		}
-		List<int[]> got = gained(invBefore, itemsOf(inv));
+		// (each change against the last: the first that gained something other than what was eaten, drunk or taken off
+		// is the loot; a dose drunk as the corpse was clicked had been taken for it, 11/25/2026)
+		List<int[]> now = itemsOf(inv);
+		Map<Integer, Long> worn = counts(client.getItemContainer(InventoryID.WORN));
+		List<int[]> got = lootGained(invSeen, now, wornSeen, worn, this::itemName);
+		invSeen = counts(inv);
+		wornSeen = worn;
 		if (!got.isEmpty())
 		{
 			loot("corpse", got, -1, true);
 		}
+	}
+
+	private String itemName(int id)
+	{
+		net.runelite.api.ItemComposition def = client.getItemDefinition(id);
+		return def == null ? null : def.getName();
+	}
+
+	/** An item's name less its dose or a "Half a": a potion's (4) and (3), a pie and its half, one thing. */
+	static String baseName(String name)
+	{
+		if (name == null)
+		{
+			return "";
+		}
+		return name.toLowerCase(java.util.Locale.ROOT).replaceAll("\\(\\d+\\)$", "").replaceFirst("^half an? ", "")
+			.replaceFirst("^(?:\\d/\\d|part) ", "").trim();
+	}
+
+	/** What a change to the inventory gained as loot: its gain over {@code before}, less what the worn equipment lost
+	 *  over the same change (gear taken off) and any item that's one the change used up in another form (a dose drunk,
+	 *  a pie half eaten: the same name less its dose or "Half a"). In the order of {@code now}'s slots. */
+	static List<int[]> lootGained(Map<Integer, Long> before, List<int[]> now, Map<Integer, Long> wornBefore,
+		Map<Integer, Long> wornNow, java.util.function.IntFunction<String> names)
+	{
+		Map<Integer, Long> after = new java.util.LinkedHashMap<>();
+		for (int[] it : now)
+		{
+			after.merge(it[0], (long) it[1], Long::sum);
+		}
+		java.util.Set<String> used = new java.util.HashSet<>();
+		for (Map.Entry<Integer, Long> e : before.entrySet())
+		{
+			if (after.getOrDefault(e.getKey(), 0L) < e.getValue())
+			{
+				used.add(baseName(names.apply(e.getKey())));
+			}
+		}
+		List<int[]> out = new ArrayList<>();
+		for (Map.Entry<Integer, Long> e : after.entrySet())
+		{
+			long off = Math.max(0, wornBefore.getOrDefault(e.getKey(), 0L) - wornNow.getOrDefault(e.getKey(), 0L));
+			long up = e.getValue() - before.getOrDefault(e.getKey(), 0L) - off;
+			if (up <= 0)
+			{
+				continue;
+			}
+			String base = baseName(names.apply(e.getKey()));
+			if (!base.isEmpty() && used.contains(base))
+			{
+				continue;
+			}
+			out.add(new int[]{e.getKey(), (int) Math.min(Integer.MAX_VALUE, up)});
+		}
+		return out;
 	}
 
 	/** The inventory changed in a Gauntlet run: after a click on its reward chest, what it gained is the run's loot, as a
@@ -3664,7 +3784,7 @@ final class Encounters
 	private void gauntletChest(ItemContainer inv)
 	{
 		if (run == null || !run.gauntlet || !"obj".equals(clickedKind) || !GAUNTLET_CHESTS.contains(clickedId)
-			|| whole() - clickedTick > CORPSE_TAKE || looted.contains(run.name))
+			|| !clickedWithin(CORPSE_TAKE) || looted.contains(run.name))
 		{
 			return;
 		}
@@ -3754,7 +3874,7 @@ final class Encounters
 		LocalPoint at = null;
 		int plane = wv.getPlane();
 		JsonObject from = null;
-		if (clickedAt != null && whole() - clickedTick <= 30)
+		if (clickedAt != null && clickedWithin(30))
 		{
 			at = clickedAt;
 			plane = clickedPlane;
@@ -3882,6 +4002,13 @@ final class Encounters
 	static final int CLOSE_LEAST = 2, CLOSE_MOST = 10;
 	/** client cycles after it's asked for before a picture that hasn't come is given up (its line goes without one) */
 	static final int SHOT_WAIT = 50;
+	/** the burrow's kind, and the client cycles after its window opens before its picture (a delver presses Descend a
+	 *  tick or two in: 30 to 60 cycles) */
+	static final String BURROW = "burrow";
+	static final int BURROW_IN = 8;
+	/** client cycles after the early picture's before the burrow's fuller one, if its window's still open (about a second
+	 *  from its opening, as the other windows wait) */
+	static final int BURROW_AGAIN = 42;
 
 	/** A window being taken, and once written, open till its `window_close`. */
 	static final class Shot
@@ -3894,6 +4021,8 @@ final class Encounters
 		List<int[]> items;
 		int in = 3, tries, waited, closeBy = -1, openedAt;
 		boolean asked, closed;
+		/** (the burrow) a second, fuller picture of a window still open about a second in, in the early one's place */
+		boolean again;
 		volatile byte[] png;
 		java.awt.Rectangle box;
 		int cw, ch;
@@ -3911,8 +4040,10 @@ final class Encounters
 			// (a chat row waits for the chatbox to draw it; a chest's inventory can fill a tick or two after its window)
 			this.tries = "chat".equals(kind) ? 12 : 60;
 			// (a window waits about a second before its picture: the Fractured Archive's chest came up as the scene
-			// behind it, or its bare background, taken three cycles in; 11/21/2026, round nine, Jace's three raids)
-			this.in = group >= 0 ? 50 : 3;
+			// behind it, or its bare background, taken three cycles in; 11/21/2026, round nine, Jace's three raids. Doom's
+			// burrow far sooner: a delver presses Descend a tick or two after it opens, and its picture had come after it
+			// closed, never; 11/23/2026, SaluteCFlagg's delve, Jace: "the loot window is not popping up every time")
+			this.in = BURROW.equals(kind) ? BURROW_IN : group >= 0 ? 50 : 3;
 		}
 
 		/** the one window it stands for: another picture of it replaces this one */
@@ -4041,7 +4172,9 @@ final class Encounters
 			}
 			java.awt.Rectangle b = "chat".equals(s.kind) ? chatLineBounds(s.title) : s.group >= 0 ? windowBounds(s.group) : inventoryBounds();
 			List<int[]> got = s.items != null ? s.items : itemsOf(client.getItemContainer(s.inv));
-			boolean ready = b != null && b.width > 0 && b.height > 0 && (s.items != null || !got.isEmpty());
+			// (the burrow's picture isn't held back for its items: they're read from DOM_LOOTPILE_DURING, which comes before
+			// the window, but a picture without them beats none; 11/23/2026)
+			boolean ready = b != null && b.width > 0 && b.height > 0 && (s.items != null || !got.isEmpty() || BURROW.equals(s.kind));
 			if (!ready && --s.tries > 0)
 			{
 				s.in = 2;
@@ -4050,9 +4183,13 @@ final class Encounters
 			s.items = got;
 			if (b == null || b.width <= 0 || b.height <= 0)
 			{
-				// (never drawn where it could be found: written without its picture)
+				// (never drawn where it could be found: written without its picture; a second picture of a window that's
+				// gone since: none, the first stands)
 				it.remove();
-				shotWritten(s);
+				if (!s.again)
+				{
+					shotWritten(s);
+				}
 				continue;
 			}
 			s.asked = true;
@@ -4075,7 +4212,28 @@ final class Encounters
 		{
 			if (shots.remove(s))
 			{
+				if (s.again)
+				{
+					// (the fuller picture: the early one closed where it stood, this one in its place)
+					for (Shot o : new ArrayList<>(shown))
+					{
+						if (o.place().equals(s.place()))
+						{
+							shotClose(o);
+						}
+					}
+				}
 				shotWritten(s);
+				// (the burrow, taken early as a delver presses Descend a tick or two in: again, fuller, if it's still
+				// open about a second in, as the other windows are taken; 11/23/2026)
+				if (BURROW.equals(s.kind) && !s.claim && !s.again && s.group >= 0)
+				{
+					Shot f = new Shot(BURROW, s.group, ++shotNo, null, null, s.inv, false, null);
+					f.again = true;
+					f.in = BURROW_AGAIN;
+					f.tries = 1;
+					shots.add(f);
+				}
 			}
 		}
 	}

@@ -45,12 +45,12 @@ public interface OutsideConfig extends Config
 		keyName = "send",
 		name = "Send to my Outside page",
 		description = "What's switched on below goes to the Outside relay (on Cloudflare) when you press Update my page in the"
-			+ " Outside side tab, and hourly while you're logged in; what you're doing goes as it changes. Your Outside page"
+			+ " Outside side tab, a minute after you log in and hourly while you're logged in; what you're doing goes as it changes. Your Outside page"
 			+ " shows it to anyone, and while you play you show on outside.wiki's globe, unless your page is friends only"
 			+ " (the side tab). Off: nothing more is sent, and your gear, stats and progress come off your page.",
 		warning = "This submits your gear, stats, quests, diaries, slayer task, what you're doing (as Discord shows it)"
 			+ " and your IP address to the Outside relay, a 3rd-party server not controlled or verified by the RuneLite"
-			+ " developers, when you press Update my page, and hourly. Your Outside page shows them publicly.",
+			+ " developers, when you press Update my page, a minute after you log in, and hourly. Your Outside page shows them publicly.",
 		position = 0,
 		section = pageSection
 	)
@@ -155,7 +155,7 @@ public interface OutsideConfig extends Config
 		keyName = "bank",
 		name = "Bank",
 		description = "On (to begin with): your whole bank (every item, how many, and its tabs) goes to your Outside"
-			+ " page with your next update after you use it (Update my page, or the hourly one), where anyone can see it",
+			+ " page with your next update after you use it (Update my page, the one after you log in, or the hourly one), where anyone can see it",
 		warning = "On, your whole bank (every item and how many) goes to the Outside relay, a server not controlled"
 			+ " or verified by the RuneLite developers, with your next update after you use your bank, and your Outside page shows it to"
 			+ " anyone who opens it. Switching it off takes it off your page.",
